@@ -133,3 +133,43 @@ class DecideRequest(BaseModel):
     decision: str
     decided_by: str
 
+
+class TaskKind(str, Enum):
+    FRONTEND = "FRONTEND"
+    BACKEND = "BACKEND"
+    DATABASE = "DATABASE"
+
+
+class TaskStatus(str, Enum):
+    PENDING = "PENDING"
+    DONE = "DONE"
+    FAILED = "FAILED"
+
+
+class BuildTask(BaseModel):
+    task_id: str
+    project_id: str
+    kind: TaskKind
+    title: str
+    status: TaskStatus = TaskStatus.PENDING
+    attempts: int = 0
+    artifact_id: str | None = None
+
+
+class BuildArtifact(BaseModel):
+    artifact_id: str
+    project_id: str
+    task_id: str
+    filename: str
+    content: str
+    created_at: str
+
+
+class BuildSubmission(BaseModel):
+    submission_id: str
+    project_id: str
+    artifact_ids: list[str]
+    task_count: int
+    created_at: str
+    status: str = "READY_FOR_AUDIT"
+

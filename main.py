@@ -26,6 +26,9 @@ from database import (
     save_quote,
     update_approval_status,
     update_project_state,
+    list_build_tasks,
+    list_build_artifacts,
+    save_build_task,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -33,6 +36,7 @@ from models import (
     ApprovalRequest,
     ApprovalStatus,
     ApprovalType,
+    BuildTask,
     ChatRequest,
     DecideRequest,
     DiscountRequest,
@@ -41,6 +45,8 @@ from models import (
     QuoteStatus,
     SignRequest,
     StartProjectRequest,
+    TaskKind,
+    TaskStatus,
 )
 
 
@@ -252,4 +258,75 @@ async def sign_project(project_id: str, body: SignRequest) -> dict:
         "state": ProjectState.SIGNED.value,
         "quote_status": accepted.status.value,
     }
+
+
+@app.post("/api/project/{project_id}/build/start")
+async def build_start(project_id: str) -> dict:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project["state"] != ProjectState.SIGNED.value:
+        raise HTTPException(status_code=400, detail="Project must be in SIGNED state")
+    if not project["spec_json"]:
+        raise HTTPException(status_code=400, detail="Project spec is missing")
+
+    from agents.engineering_build import breakdown_tasks
+    spec = ProjectSpec.model_validate_json(project["spec_json"])
+    tasks = breakdown_tasks(spec)
+    for task in tasks:
+        task.project_id = project_id
+        await save_build_task(task)
+
+    await update_project_state(project_id, ProjectState.BUILDING.value)
+
+    return {
+        "project_id": project_id,
+        "state": ProjectState.BUILDING.value,
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "kind": t.kind.value,
+                "title": t.title,
+                "status": t.status.value,
+            }
+            for t in tasks
+        ],
+    }
+
+
+@app.post("/api/project/{project_id}/build/run")
+async def build_run(project_id: str) -> dict:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project["state"] != ProjectState.BUILDING.value:
+        raise HTTPException(status_code=400, detail="Project must be in BUILDING state")
+
+    from agents.engineering_build import run_build
+    submission = await run_build(project_id)
+    
+    if submission.status.startswith("BLOCKED"):
+        return {
+            "status": "BLOCKED",
+            "project_id": project_id,
+            "project_state": "BLOCKED",
+            "submission": submission.model_dump(),
+        }
+    
+    return {
+        "status": submission.status,
+        "project_id": project_id,
+        "project_state": "AUDITING" if submission.status == "READY_FOR_AUDIT" else project["state"],
+        "submission": submission.model_dump(),
+    }
+
+
+@app.get("/api/project/{project_id}/build/status")
+async def build_status(project_id: str) -> dict:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from agents.engineering_build import get_build_status
+    return await get_build_status(project_id)
 

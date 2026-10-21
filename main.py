@@ -1,30 +1,40 @@
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
 import database
 from agents.cs_intake import run_discovery
 from agents.finance_costing import (
     DiscountHardCap,
-    EscalationRequired,
     apply_discount,
     calculate_quote,
     estimate_effort,
 )
+from core.telegram_gateway import send_approval_request
 from database import (
     create_project,
+    get_approval,
     get_latest_quote,
     get_project,
     get_quote,
     init_db,
+    list_pending_approvals,
+    save_approval,
     save_quote,
+    update_approval_status,
     update_project_state,
 )
 from models import (
     ALLOWED_TRANSITIONS,
     AdvanceStateRequest,
+    ApprovalRequest,
+    ApprovalStatus,
+    ApprovalType,
     ChatRequest,
+    DecideRequest,
     DiscountRequest,
     ProjectSpec,
     ProjectState,
@@ -117,14 +127,102 @@ async def discount_quote(project_id: str, quote_id: str, body: DiscountRequest):
     quote = await get_quote(quote_id)
     if quote is None or quote.project_id != project_id:
         raise HTTPException(status_code=404, detail="Quote not found")
+    if body.discount_pct > 30:
+        raise HTTPException(status_code=400, detail="DISCOUNT_HARD_CAP")
+    if body.discount_pct > 10 and not body.founder_approved:
+        projected = apply_discount(quote, body.discount_pct, founder_approved=True)
+        approval = ApprovalRequest(
+            approval_id=str(uuid.uuid4()),
+            project_id=project_id,
+            quote_id=quote_id,
+            type=ApprovalType.DISCOUNT_ESCALATION,
+            payload={
+                "discount_pct": body.discount_pct,
+                "final_price_before": quote.final_price,
+                "final_price_after": projected.final_price,
+            },
+            status=ApprovalStatus.PENDING,
+            requested_at=datetime.now(timezone.utc).isoformat(),
+        )
+        await save_approval(approval)
+        await send_approval_request(approval)
+        return JSONResponse(
+            status_code=202,
+            content={"status": "ESCALATED", "approval_id": approval.approval_id},
+        )
     try:
         updated = apply_discount(quote, body.discount_pct, body.founder_approved)
     except DiscountHardCap:
         raise HTTPException(status_code=400, detail="DISCOUNT_HARD_CAP") from None
-    except EscalationRequired:
-        raise HTTPException(status_code=409, detail="ESCALATION_REQUIRED") from None
     await save_quote(updated)
     return updated
+
+
+async def decide_approval(approval_id: str, decision: str, decided_by: str) -> dict:
+    if decision not in ("APPROVED", "REJECTED"):
+        raise HTTPException(status_code=400, detail="INVALID_DECISION")
+    approval = await get_approval(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=409, detail="APPROVAL_ALREADY_DECIDED")
+
+    decided_at = datetime.now(timezone.utc).isoformat()
+    if decision == "REJECTED":
+        await update_approval_status(
+            approval_id, ApprovalStatus.REJECTED.value, decided_at, decided_by
+        )
+        quote = await get_quote(approval.quote_id)
+        return {
+            "approval_id": approval_id,
+            "status": ApprovalStatus.REJECTED.value,
+            "final_price": None if quote is None else quote.final_price,
+            "discount_pct": None if quote is None else quote.discount_pct,
+        }
+
+    quote = await get_quote(approval.quote_id)
+    if quote is None:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    try:
+        updated = apply_discount(
+            quote, int(approval.payload.discount_pct), founder_approved=True
+        )
+    except DiscountHardCap:
+        raise HTTPException(status_code=400, detail="DISCOUNT_HARD_CAP") from None
+    await save_quote(updated)
+    await update_approval_status(
+        approval_id, ApprovalStatus.APPROVED.value, decided_at, decided_by
+    )
+    return {
+        "approval_id": approval_id,
+        "status": ApprovalStatus.APPROVED.value,
+        "final_price": updated.final_price,
+        "discount_pct": updated.discount_pct,
+    }
+
+
+@app.get("/api/approvals/pending")
+async def pending_approvals():
+    return await list_pending_approvals()
+
+
+@app.post("/api/approvals/{approval_id}/decide")
+async def decide_approval_endpoint(approval_id: str, body: DecideRequest) -> dict:
+    return await decide_approval(approval_id, body.decision, body.decided_by)
+
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(payload: dict) -> dict:
+    callback = payload.get("callback_query")
+    if not isinstance(callback, dict):
+        raise HTTPException(status_code=400, detail="callback_query missing")
+    data = str(callback.get("data") or "")
+    if "|" not in data:
+        raise HTTPException(status_code=400, detail="invalid callback data")
+    decision, approval_id = data.split("|", 1)
+    sender = callback.get("from") if isinstance(callback.get("from"), dict) else {}
+    decided_by = sender.get("first_name") or "MUHAMMAD MUFTI ZAKA"
+    return await decide_approval(approval_id, decision, decided_by)
 
 
 @app.post("/api/project/{project_id}/sign")

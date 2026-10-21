@@ -98,3 +98,38 @@ class DiscountRequest(BaseModel):
 class SignRequest(BaseModel):
     quote_id: str
 
+
+class ApprovalType(str, Enum):
+    DISCOUNT_ESCALATION = "DISCOUNT_ESCALATION"
+    DEPLOY = "DEPLOY"
+    PAYMENT = "PAYMENT"
+
+
+class ApprovalStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class ApprovalPayload(BaseModel):
+    discount_pct: int
+    final_price_before: int
+    final_price_after: int
+
+
+class ApprovalRequest(BaseModel):
+    approval_id: str
+    project_id: str
+    quote_id: str
+    type: ApprovalType
+    payload: ApprovalPayload
+    status: ApprovalStatus
+    requested_at: str
+    decided_at: str = ""
+    decided_by: str = ""
+
+
+class DecideRequest(BaseModel):
+    decision: str
+    decided_by: str
+

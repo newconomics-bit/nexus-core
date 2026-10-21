@@ -1,3 +1,4 @@
+import math
 import uuid
 from datetime import datetime, timezone
 
@@ -18,12 +19,12 @@ class DiscountHardCap(Exception):
     pass
 
 
-def round_to_nearest_50000(amount: float) -> int:
-    return int((amount + PRICE_STEP / 2) // PRICE_STEP * PRICE_STEP)
+def ceil_to_50000(amount: float) -> int:
+    return int(math.ceil(amount / PRICE_STEP) * PRICE_STEP)
 
 
 def selling_price(total_hpp: int, margin_pct: float, discount_pct: float) -> int:
-    gross = round_to_nearest_50000(total_hpp * (100 + margin_pct) / 100)
+    gross = ceil_to_50000(total_hpp * (100 + margin_pct) / 100)
     return int(round(gross * (100 - discount_pct) / 100))
 
 

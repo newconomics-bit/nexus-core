@@ -2,7 +2,7 @@ import json
 
 import aiosqlite
 
-from models import Quote
+from models import ApprovalRequest, Quote
 
 DB_PATH = "rakitdigital.db"
 
@@ -35,6 +35,21 @@ async def init_db() -> None:
                 status TEXT NOT NULL,
                 valid_until_days INTEGER NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS approvals (
+                approval_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                quote_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                decided_at TEXT NOT NULL DEFAULT '',
+                decided_by TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -168,3 +183,86 @@ async def get_latest_quote(project_id: str) -> Quote | None:
         if row is None:
             return None
         return _row_to_quote(row)
+
+
+def _row_to_approval(row: aiosqlite.Row) -> ApprovalRequest:
+    return ApprovalRequest.model_validate(
+        {
+            "approval_id": row["approval_id"],
+            "project_id": row["project_id"],
+            "quote_id": row["quote_id"],
+            "type": row["type"],
+            "payload": json.loads(row["payload"]),
+            "status": row["status"],
+            "requested_at": row["requested_at"],
+            "decided_at": row["decided_at"],
+            "decided_by": row["decided_by"],
+        }
+    )
+
+
+async def save_approval(approval: ApprovalRequest) -> None:
+    payload = approval.model_dump(mode="json")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO approvals (
+                approval_id, project_id, quote_id, type, payload, status,
+                requested_at, decided_at, decided_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["approval_id"],
+                payload["project_id"],
+                payload["quote_id"],
+                payload["type"],
+                json.dumps(payload["payload"]),
+                payload["status"],
+                payload["requested_at"],
+                payload["decided_at"],
+                payload["decided_by"],
+            ),
+        )
+        await db.commit()
+
+
+async def get_approval(approval_id: str) -> ApprovalRequest | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM approvals WHERE approval_id = ?",
+            (approval_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_approval(row)
+
+
+async def list_pending_approvals() -> list[ApprovalRequest]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM approvals
+            WHERE status = 'PENDING'
+            ORDER BY requested_at ASC
+            """
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_approval(row) for row in rows]
+
+
+async def update_approval_status(
+    approval_id: str, status: str, decided_at: str, decided_by: str
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE approvals
+            SET status = ?, decided_at = ?, decided_by = ?
+            WHERE approval_id = ?
+            """,
+            (status, decided_at, decided_by, approval_id),
+        )
+        await db.commit()

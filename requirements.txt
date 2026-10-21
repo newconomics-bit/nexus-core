@@ -4,3 +4,5 @@ pydantic
 aiosqlite
 pytest
 httpx
+openai
+python-dotenv

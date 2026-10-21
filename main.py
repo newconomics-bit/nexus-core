@@ -3,10 +3,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
+import database
+from agents.cs_intake import run_discovery
 from database import create_project, get_project, init_db, update_project_state
 from models import (
     ALLOWED_TRANSITIONS,
     AdvanceStateRequest,
+    ChatRequest,
     ProjectState,
     StartProjectRequest,
 )
@@ -56,3 +59,17 @@ async def advance_project(project_id: str, body: AdvanceStateRequest) -> dict:
 
     await update_project_state(project_id, body.new_state.value)
     return {"project_id": project_id, "state": body.new_state.value}
+
+
+@app.post("/api/project/{project_id}/chat")
+async def project_chat(project_id: str, body: ChatRequest) -> dict:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = await run_discovery(project_id, body.message, database)
+    if result["status"] == "SPEC_COMPLETE":
+        await update_project_state(project_id, ProjectState.QUOTED.value)
+        result["state"] = ProjectState.QUOTED.value
+    return result
+

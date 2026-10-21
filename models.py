@@ -39,3 +39,14 @@ class StartProjectRequest(BaseModel):
 
 class AdvanceStateRequest(BaseModel):
     new_state: ProjectState
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ProjectSpec(BaseModel):
+    client_name: str
+    features: list[str]
+    budget: str
+

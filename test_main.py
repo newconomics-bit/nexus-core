@@ -1,8 +1,10 @@
+import sqlite3
 import uuid
 
 import pytest
 from fastapi.testclient import TestClient
 
+from database import DB_PATH
 from main import app
 
 
@@ -53,3 +55,46 @@ def test_invalid_state_transition(client):
         json={"new_state": "QUOTED"},
     )
     assert response.status_code == 400
+
+
+def test_chat_incomplete_is_not_json(client):
+    created = client.post("/api/project/start", json={"client_name": "Toko Maju"}).json()
+    response = client.post(
+        f"/api/project/{created['project_id']}/chat",
+        json={"message": "Halo mau bikin kasir"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "NEED_MORE_INFO"
+    reply = body["reply"]
+    assert not reply.lstrip().startswith("{")
+    assert "```json" not in reply
+
+
+def test_chat_complete_spec_moves_to_quoted(client):
+    created = client.post("/api/project/start", json={"client_name": "Toko Maju"}).json()
+    response = client.post(
+        f"/api/project/{created['project_id']}/chat",
+        json={
+            "message": (
+                "Nama usaha: Toko Maju. "
+                "Fitur: kasir, stok, laporan harian. "
+                "Budget: 5000000."
+            )
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "SPEC_COMPLETE"
+    assert response.json()["state"] == "QUOTED"
+
+    connection = sqlite3.connect(DB_PATH)
+    try:
+        row = connection.execute(
+            "SELECT state FROM projects WHERE id = ?",
+            (created["project_id"],),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    assert row[0] == "QUOTED"
+

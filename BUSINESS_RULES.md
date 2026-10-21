@@ -1,7 +1,7 @@
 # BUSINESS RULES (ATURAN BISNIS SATRIA BAHARI)
 
 ## 1. IDENTITAS & LEGAL
-- **Nama Brand:** nexus Digital
+- **Nama Brand:** RakitDigital
 - **Founder & Penanggung Jawab:** MUHAMMAD MUFTI ZAKA
 - **Entity:** Perorangan / Freelancer (Atas nama Muhammad Mufti Zaka)
 - **Rekening & Invoice:** Atas nama MUHAMMAD MUFTI ZAKA.

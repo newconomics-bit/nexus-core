@@ -145,7 +145,7 @@ def test_generate_quote_matches_cost_plus_math(client):
     assert body["hpp_breakdown"]["labor_rate"] == 75000
     assert body["hpp_breakdown"]["total_hpp"] == 1350000
     assert body["margin_pct"] == 75
-    assert body["final_price"] == 2350000
+    assert body["final_price"] == 2400000
     assert body["version"] == 1
     assert body["status"] == "ACTIVE"
 
@@ -165,23 +165,24 @@ def test_discount_guardrails(client):
     ten = client.post(path, json={"discount_pct": 10, "founder_approved": False})
     assert ten.status_code == 200
     assert ten.json()["discount_pct"] == 10
-    assert ten.json()["final_price"] == 2115000
+    assert ten.json()["final_price"] == 2160000
 
     blocked = client.post(path, json={"discount_pct": 15, "founder_approved": False})
-    assert blocked.status_code == 409
-    assert blocked.json()["detail"] == "ESCALATION_REQUIRED"
-    assert _quote_row(quote_id)[0] == 2115000
+    assert blocked.status_code == 202
+    assert blocked.json()["status"] == "ESCALATED"
+    assert blocked.json()["approval_id"]
+    assert _quote_row(quote_id)[0] == 2160000
     assert _quote_row(quote_id)[1] == 10
 
     approved = client.post(path, json={"discount_pct": 15, "founder_approved": True})
     assert approved.status_code == 200
-    assert approved.json()["final_price"] == 1997500
+    assert approved.json()["final_price"] == 2040000
 
     hard_cap = client.post(path, json={"discount_pct": 35, "founder_approved": True})
     assert hard_cap.status_code == 400
     assert hard_cap.json()["detail"] == "DISCOUNT_HARD_CAP"
     price, discount_pct, _status = _quote_row(quote_id)
-    assert price == 1997500
+    assert price == 2040000
     assert discount_pct == 15
 
 
@@ -209,5 +210,128 @@ def test_sign_latest_quote_and_reject_old_version(client):
     assert signed.json()["quote_status"] == "ACCEPTED"
     assert _project_state(project_id) == "SIGNED"
     assert _quote_row(second["quote_id"])[2] == "ACCEPTED"
+
+
+def _fresh_quote(client):
+    project_id = _quoted_project(client)
+    quote = client.post(f"/api/project/{project_id}/quote/generate").json()
+    return project_id, quote
+
+
+def test_margin_ceil_rounds_price_up(client):
+    _project_id, quote = _fresh_quote(client)
+    assert quote["hpp_breakdown"]["total_hpp"] == 1350000
+    assert quote["final_price"] == 2400000
+
+
+def test_discount_15_without_approval_escalates(client):
+    project_id, quote = _fresh_quote(client)
+    response = client.post(
+        f"/api/project/{project_id}/quote/{quote['quote_id']}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    )
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "ESCALATED"
+    approval_id = body["approval_id"]
+    assert _quote_row(quote["quote_id"])[0] == 2400000
+    assert _quote_row(quote["quote_id"])[1] == 0
+
+    pending = client.get("/api/approvals/pending").json()
+    match = next(item for item in pending if item["approval_id"] == approval_id)
+    assert match["status"] == "PENDING"
+    assert match["payload"]["discount_pct"] == 15
+    assert match["payload"]["final_price_before"] == 2400000
+    assert match["payload"]["final_price_after"] == 2040000
+
+
+def test_decide_approved_applies_discount(client):
+    project_id, quote = _fresh_quote(client)
+    escalated = client.post(
+        f"/api/project/{project_id}/quote/{quote['quote_id']}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    ).json()
+    approval_id = escalated["approval_id"]
+    decided = client.post(
+        f"/api/approvals/{approval_id}/decide",
+        json={"decision": "APPROVED", "decided_by": "MUHAMMAD MUFTI ZAKA"},
+    )
+    assert decided.status_code == 200
+    assert decided.json()["status"] == "APPROVED"
+    assert decided.json()["final_price"] == 2040000
+    assert _quote_row(quote["quote_id"])[0] == 2040000
+    assert _quote_row(quote["quote_id"])[1] == 15
+
+
+def test_decide_rejected_leaves_quote(client):
+    project_id, quote = _fresh_quote(client)
+    escalated = client.post(
+        f"/api/project/{project_id}/quote/{quote['quote_id']}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    ).json()
+    decided = client.post(
+        f"/api/approvals/{escalated['approval_id']}/decide",
+        json={"decision": "REJECTED", "decided_by": "MUHAMMAD MUFTI ZAKA"},
+    )
+    assert decided.status_code == 200
+    assert decided.json()["status"] == "REJECTED"
+    assert decided.json()["final_price"] == 2400000
+    assert _quote_row(quote["quote_id"])[0] == 2400000
+    assert _quote_row(quote["quote_id"])[1] == 0
+
+
+def test_decide_twice_returns_409(client):
+    project_id, quote = _fresh_quote(client)
+    escalated = client.post(
+        f"/api/project/{project_id}/quote/{quote['quote_id']}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    ).json()
+    path = f"/api/approvals/{escalated['approval_id']}/decide"
+    body = {"decision": "APPROVED", "decided_by": "MUHAMMAD MUFTI ZAKA"}
+    first = client.post(path, json=body)
+    second = client.post(path, json=body)
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["detail"] == "APPROVAL_ALREADY_DECIDED"
+
+
+def test_pending_approvals_lists_open_requests(client):
+    project_id, quote = _fresh_quote(client)
+    escalated = client.post(
+        f"/api/project/{project_id}/quote/{quote['quote_id']}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    ).json()
+    response = client.get("/api/approvals/pending")
+    assert response.status_code == 200
+    pending = response.json()
+    assert any(
+        item["approval_id"] == escalated["approval_id"] and item["status"] == "PENDING"
+        for item in pending
+    )
+
+
+def test_telegram_webhook_callback_decides_approval(client):
+    project_id, quote = _fresh_quote(client)
+    escalated = client.post(
+        f"/api/project/{project_id}/quote/{quote['quote_id']}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    ).json()
+    approval_id = escalated["approval_id"]
+    response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "update_id": 1,
+            "callback_query": {
+                "id": "cb-mock-1",
+                "data": f"APPROVED|{approval_id}",
+                "from": {"id": 1, "first_name": "MUHAMMAD MUFTI ZAKA"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "APPROVED"
+    assert response.json()["final_price"] == 2040000
+    assert _quote_row(quote["quote_id"])[0] == 2040000
+
 
 

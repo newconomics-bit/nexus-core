@@ -2,7 +2,7 @@ import json
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport
 
 DB_PATH = "rakitdigital.db"
 
@@ -90,6 +90,36 @@ async def init_db() -> None:
                 task_count INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 status TEXT NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_findings (
+                finding_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                submission_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                location TEXT NOT NULL,
+                description TEXT NOT NULL,
+                recommendation TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_reports (
+                report_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                submission_id TEXT NOT NULL,
+                cycle INTEGER NOT NULL,
+                findings TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
             """
         )
@@ -494,3 +524,131 @@ async def list_build_submissions(project_id: str) -> list[BuildSubmission]:
         )
         rows = await cursor.fetchall()
         return [_row_to_build_submission(row) for row in rows]
+
+
+def _row_to_audit_finding(row: aiosqlite.Row) -> AuditFinding:
+    return AuditFinding.model_validate(
+        {
+            "finding_id": row["finding_id"],
+            "project_id": row["project_id"],
+            "submission_id": row["submission_id"],
+            "category": row["category"],
+            "severity": row["severity"],
+            "location": row["location"],
+            "description": row["description"],
+            "recommendation": row["recommendation"],
+        }
+    )
+
+
+async def save_audit_finding(finding: AuditFinding) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO audit_findings (
+                finding_id, project_id, submission_id, category, severity,
+                location, description, recommendation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                finding.finding_id,
+                finding.project_id,
+                finding.submission_id,
+                finding.category.value,
+                finding.severity.value,
+                finding.location,
+                finding.description,
+                finding.recommendation,
+            ),
+        )
+        await db.commit()
+
+
+async def list_audit_findings(project_id: str, submission_id: str | None = None) -> list[AuditFinding]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if submission_id:
+            cursor = await db.execute(
+                "SELECT * FROM audit_findings WHERE project_id = ? AND submission_id = ? ORDER BY finding_id",
+                (project_id, submission_id),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM audit_findings WHERE project_id = ? ORDER BY finding_id",
+                (project_id,),
+            )
+        rows = await cursor.fetchall()
+        return [_row_to_audit_finding(row) for row in rows]
+
+
+def _row_to_audit_report(row: aiosqlite.Row) -> AuditReport:
+    import json
+
+    return AuditReport.model_validate(
+        {
+            "report_id": row["report_id"],
+            "project_id": row["project_id"],
+            "submission_id": row["submission_id"],
+            "cycle": row["cycle"],
+            "findings": json.loads(row["findings"]),
+            "status": row["status"],
+            "created_at": row["created_at"],
+        }
+    )
+
+
+async def save_audit_report(report: AuditReport) -> None:
+    import json
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO audit_reports (
+                report_id, project_id, submission_id, cycle, findings, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report.report_id,
+                report.project_id,
+                report.submission_id,
+                report.cycle,
+                json.dumps([f.model_dump(mode="json") for f in report.findings]),
+                report.status.value,
+                report.created_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_audit_report(report_id: str) -> AuditReport | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM audit_reports WHERE report_id = ?",
+            (report_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_audit_report(row)
+
+
+async def list_audit_reports(project_id: str) -> list[AuditReport]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM audit_reports WHERE project_id = ? ORDER BY cycle ASC",
+            (project_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_audit_report(row) for row in rows]
+
+
+async def count_audit_reports(project_id: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM audit_reports WHERE project_id = ?",
+            (project_id,),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0

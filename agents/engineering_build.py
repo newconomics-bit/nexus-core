@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from core.llm_gateway import call_llm
 from database import (
     get_project,
+    get_build_artifact,
     list_build_tasks,
     list_build_artifacts,
     save_build_artifact,

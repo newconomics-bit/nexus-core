@@ -2,7 +2,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
 
 import database
@@ -13,7 +13,8 @@ from agents.finance_costing import (
     calculate_quote,
     estimate_effort,
 )
-from core.telegram_gateway import send_approval_request
+from core.telegram_bot import send_approval_card, send_access_denied_message
+from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity
 from database import (
     create_project,
     get_approval,
@@ -32,6 +33,7 @@ from database import (
     list_audit_reports,
     count_audit_reports,
     get_deployment_by_project,
+    list_invoices,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -51,11 +53,15 @@ from models import (
     DiscountRequest,
     DomainChoice,
     FindingSeverity,
+    Invoice,
+    InvoiceStatus,
     ProjectSpec,
     ProjectState,
     QuoteStatus,
     SignRequest,
     StartProjectRequest,
+    Subscription,
+    SubscriptionStatus,
     TaskKind,
     TaskStatus,
 )
@@ -67,7 +73,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, dependencies=[Depends(verify_api_key)])
 
 
 @app.get("/health")
@@ -162,7 +168,7 @@ async def discount_quote(project_id: str, quote_id: str, body: DiscountRequest):
             requested_at=datetime.now(timezone.utc).isoformat(),
         )
         await save_approval(approval)
-        await send_approval_request(approval)
+        await send_approval_card(approval)
         return JSONResponse(
             status_code=202,
             content={"status": "ESCALATED", "approval_id": approval.approval_id},
@@ -188,6 +194,7 @@ async def decide_approval(approval_id: str, decision: str, decided_by: str) -> d
 
     if approval.type == ApprovalType.DEPLOY_PRODUCTION:
         from agents.technical_ops import execute_deployment
+        from agents.billing_dunning import activate_subscription
         from database import get_deployment, save_deployment, update_project_state
         from models import DeploymentStatus
 
@@ -211,6 +218,11 @@ async def decide_approval(approval_id: str, decision: str, decided_by: str) -> d
             approval_id, ApprovalStatus.APPROVED.value, decided_at, decided_by
         )
         result = await execute_deployment(approval_id)
+
+        project_id = approval.payload.get("project_id")
+        if project_id:
+            await activate_subscription(project_id)
+
         return {
             "approval_id": approval_id,
             "status": ApprovalStatus.APPROVED.value,
@@ -260,16 +272,35 @@ async def decide_approval_endpoint(approval_id: str, body: DecideRequest) -> dic
     return await decide_approval(approval_id, body.decision, body.decided_by)
 
 
-@app.post("/api/telegram/webhook")
+@app.post("/api/telegram/webhook", dependencies=[Depends(verify_telegram_secret)])
 async def telegram_webhook(payload: dict) -> dict:
     callback = payload.get("callback_query")
     if not isinstance(callback, dict):
         raise HTTPException(status_code=400, detail="callback_query missing")
+
     data = str(callback.get("data") or "")
     if "|" not in data:
         raise HTTPException(status_code=400, detail="invalid callback data")
-    decision, approval_id = data.split("|", 1)
+
+    action, approval_id = data.split("|", 1)
+
+    if action not in ("APPROVE", "REJECT"):
+        raise HTTPException(status_code=400, detail="invalid action")
+
+    decision = "APPROVED" if action == "APPROVE" else "REJECTED"
+
     sender = callback.get("from") if isinstance(callback.get("from"), dict) else {}
+    chat_id = sender.get("id")
+
+    if chat_id is None:
+        raise HTTPException(status_code=400, detail="chat_id missing in callback")
+
+    try:
+        await verify_founder_identity(chat_id)
+    except HTTPException:
+        await send_access_denied_message(str(chat_id))
+        raise
+
     decided_by = sender.get("first_name") or "MUHAMMAD MUFTI ZAKA"
     return await decide_approval(approval_id, decision, decided_by)
 
@@ -442,4 +473,42 @@ async def deploy_request(project_id: str, body: dict) -> dict:
         "approval_id": approval_id,
         "status": "PENDING_APPROVAL",
     }
+
+
+@app.post("/api/webhooks/payment/mock")
+async def payment_webhook(body: dict) -> dict:
+    invoice_id = body.get("invoice_id")
+    status = body.get("status")
+    if not invoice_id or status != "PAID":
+        raise HTTPException(status_code=400, detail="invoice_id and status=PAID required")
+
+    from agents.billing_dunning import process_payment
+    try:
+        invoice = await process_payment(invoice_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "invoice_id": invoice.invoice_id,
+        "status": invoice.status.value,
+        "paid_at": invoice.paid_at,
+    }
+
+
+@app.post("/api/billing/dunning/run")
+async def run_dunning() -> list[dict]:
+    from agents.billing_dunning import run_dunning_sop
+    actions = await run_dunning_sop()
+    return actions
+
+
+@app.get("/api/project/{project_id}/billing/invoices")
+async def get_project_invoices(project_id: str) -> list[dict]:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from database import list_invoices
+    invoices = await list_invoices(project_id)
+    return [inv.model_dump() for inv in invoices]
 

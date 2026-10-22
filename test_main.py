@@ -1,5 +1,6 @@
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,9 +9,13 @@ from database import DB_PATH
 from main import app
 
 
+API_KEY = "dev-secret-key-change-in-production"
+
+
 @pytest.fixture
 def client():
     with TestClient(app) as http:
+        http.headers.update({"X-API-Key": API_KEY})
         yield http
 
 
@@ -323,10 +328,11 @@ def test_telegram_webhook_callback_decides_approval(client):
             "update_id": 1,
             "callback_query": {
                 "id": "cb-mock-1",
-                "data": f"APPROVED|{approval_id}",
-                "from": {"id": 1, "first_name": "MUHAMMAD MUFTI ZAKA"},
+                "data": f"APPROVE|{approval_id}",
+                "from": {"id": 123456789, "first_name": "MUHAMMAD MUFTI ZAKA"},
             },
         },
+        headers={"X-Telegram-Bot-Api-Secret-Token": "dev-webhook-secret-change-in-production"},
     )
     assert response.status_code == 200
     assert response.json()["status"] == "APPROVED"
@@ -723,7 +729,7 @@ def test_deploy_approve_full_flow(client):
     assert body["deployment"]["live_url"].endswith(".rakitdigital.app")
 
     state = _project_state(project_id)
-    assert state == "DEPLOYED"
+    assert state == "SUBSCRIPTION"
 
 
 def test_deploy_reject_keeps_approved_state(client):
@@ -751,6 +757,241 @@ def test_deploy_reject_keeps_approved_state(client):
     pending = client.get("/api/approvals/pending").json()
     dep_approvals = [a for a in pending if a["type"] == "DEPLOY_PRODUCTION" and a["project_id"] == project_id]
     assert len(dep_approvals) == 0
+
+
+def _deployed_project(client) -> str:
+    project_id = _approved_project(client)
+    deploy_resp = client.post(
+        f"/api/project/{project_id}/deploy/request",
+        json={"domain_choice": "HOSTED"},
+    )
+    assert deploy_resp.status_code == 200
+    approval_id = deploy_resp.json()["approval_id"]
+    decide_resp = client.post(
+        f"/api/approvals/{approval_id}/decide",
+        json={"decision": "APPROVED", "decided_by": "MUHAMMAD MUFTI ZAKA"},
+    )
+    assert decide_resp.status_code == 200
+    assert decide_resp.json()["deployment"]["status"] == "DEPLOYED"
+    assert _project_state(project_id) == "SUBSCRIPTION"
+    return project_id
+
+
+def test_billing_activate_subscription_on_deploy(client):
+    project_id = _deployed_project(client)
+    state = _project_state(project_id)
+    assert state == "SUBSCRIPTION"
+
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    assert len(invoices) == 1
+    assert invoices[0]["status"] == "PENDING"
+    assert invoices[0]["amount"] == 150000
+
+
+def test_billing_mock_payment_creates_next_invoice(client):
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    invoice_id = invoices[0]["invoice_id"]
+
+    webhook_resp = client.post(
+        "/api/webhooks/payment/mock",
+        json={"invoice_id": invoice_id, "status": "PAID"},
+    )
+    assert webhook_resp.status_code == 200
+    assert webhook_resp.json()["status"] == "PAID"
+
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    assert len(invoices) == 2
+    assert invoices[0]["status"] == "PAID"
+    assert invoices[1]["status"] == "PENDING"
+    assert invoices[1]["amount"] == 150000
+
+
+def test_dunning_h3_reminder(client):
+    # Clean up any existing invoices/subscriptions from previous tests
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM subscriptions")
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE invoices SET due_date = ? WHERE project_id = ? AND status = 'PENDING'",
+            ((datetime.now(timezone.utc) - timedelta(days=4)).isoformat(), project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    actions = client.post("/api/billing/dunning/run").json()
+    reminder_actions = [a for a in actions if a["action"] == "REMINDER_SENT"]
+    assert len(reminder_actions) == 1
+    assert "Wati: Kirim WA Reminder" in reminder_actions[0]["message"]
+
+    state = _project_state(project_id)
+    assert state == "SUBSCRIPTION"
+
+
+def test_dunning_h7_suspend(client):
+    # Clean up any existing invoices/subscriptions from previous tests
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM subscriptions")
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE invoices SET due_date = ? WHERE project_id = ? AND status = 'PENDING'",
+            ((datetime.now(timezone.utc) - timedelta(days=8)).isoformat(), project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    actions = client.post("/api/billing/dunning/run").json()
+    suspend_actions = [a for a in actions if a["action"] == "SUSPENDED"]
+    assert len(suspend_actions) == 1
+    assert "Om Tono: Suspend website" in suspend_actions[0]["message"]
+
+    state = _project_state(project_id)
+    assert state == "SUSPENDED"
+
+
+def test_dunning_h30_churn(client):
+    # Clean up any existing invoices/subscriptions from previous tests
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM subscriptions")
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE invoices SET due_date = ? WHERE project_id = ? AND status = 'PENDING'",
+            ((datetime.now(timezone.utc) - timedelta(days=31)).isoformat(), project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    actions = client.post("/api/billing/dunning/run").json()
+    churn_actions = [a for a in actions if a["action"] == "CHURNED"]
+    assert len(churn_actions) == 1
+    assert "Om Tono: Hapus server & DB" in churn_actions[0]["message"]
+
+    state = _project_state(project_id)
+    assert state == "CHURNED"
+
+
+TELEGRAM_WEBHOOK_SECRET = "dev-webhook-secret-change-in-production"
+FOUNDER_CHAT_ID = "123456789"
+STRANGER_CHAT_ID = "999999999"
+
+
+def test_security_api_key_required(client):
+    client.headers.pop("X-API-Key", None)
+    response = client.post("/api/project/start", json={"client_name": "Toko Maju"})
+    assert response.status_code == 401
+    assert "Unauthorized" in response.json()["detail"]
+
+
+def test_security_api_key_valid(client):
+    response = client.post("/api/project/start", json={"client_name": "Toko Maju"})
+    assert response.status_code == 200
+    assert response.json()["client_name"] == "Toko Maju"
+
+
+def test_security_telegram_webhook_secret_required(client):
+    response = client.post("/api/telegram/webhook", json={"callback_query": {"data": "APPROVE|test", "from": {"id": FOUNDER_CHAT_ID}}})
+    assert response.status_code == 401
+    assert "Unauthorized" in response.json()["detail"]
+
+
+def test_security_telegram_founder_lock_stranger(client, monkeypatch):
+    # Create an approval first
+    project_id = _approved_project(client)
+    deploy_resp = client.post(f"/api/project/{project_id}/deploy/request", json={"domain_choice": "HOSTED"})
+    approval_id = deploy_resp.json()["approval_id"]
+
+    # Verify approval is PENDING
+    pending = client.get("/api/approvals/pending").json()
+    approval = next(a for a in pending if a["approval_id"] == approval_id)
+    assert approval["status"] == "PENDING"
+
+    # Stranger tries to approve
+    headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_WEBHOOK_SECRET}
+    response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "callback_query": {
+                "data": f"APPROVE|{approval_id}",
+                "from": {"id": STRANGER_CHAT_ID, "first_name": "Hacker"},
+            }
+        },
+        headers=headers,
+    )
+    assert response.status_code == 403
+    assert "Akses Ditolak" in response.json()["detail"]
+
+    # Verify approval is still PENDING
+    pending = client.get("/api/approvals/pending").json()
+    approval = next(a for a in pending if a["approval_id"] == approval_id)
+    assert approval["status"] == "PENDING"
+
+
+def test_security_telegram_founder_lock_founder(client, monkeypatch):
+    # Create an approval first
+    project_id = _approved_project(client)
+    deploy_resp = client.post(f"/api/project/{project_id}/deploy/request", json={"domain_choice": "HOSTED"})
+    approval_id = deploy_resp.json()["approval_id"]
+
+    # Founder approves
+    headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_WEBHOOK_SECRET}
+    response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "callback_query": {
+                "data": f"APPROVE|{approval_id}",
+                "from": {"id": FOUNDER_CHAT_ID, "first_name": "MUHAMMAD MUFTI ZAKA"},
+            }
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "APPROVED"
+
+    # Verify approval is APPROVED
+    pending = client.get("/api/approvals/pending").json()
+    approval = next((a for a in pending if a["approval_id"] == approval_id), None)
+    assert approval is None or approval["status"] == "APPROVED"
 
 
 

@@ -12,6 +12,7 @@ from database import (
     save_approval,
     update_project_state,
 )
+from core.telegram_bot import send_approval_card
 from models import (
     ApprovalRequest,
     ApprovalStatus,
@@ -185,7 +186,7 @@ async def run_audit(project_id: str, submission_id: str) -> AuditReport:
         else:
             report_status = AuditReportStatus.ESCALATED
             await update_project_state(project_id, "BLOCKED")
-            
+
             approval = ApprovalRequest(
                 approval_id=str(uuid.uuid4()),
                 project_id=project_id,
@@ -201,6 +202,7 @@ async def run_audit(project_id: str, submission_id: str) -> AuditReport:
                 requested_at=datetime.now(timezone.utc).isoformat(),
             )
             await save_approval(approval)
+            await send_approval_card(approval)
     else:
         report_status = AuditReportStatus.PASSED
         await update_project_state(project_id, "APPROVED")

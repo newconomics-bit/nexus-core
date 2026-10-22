@@ -32,6 +32,7 @@ from database import (
     list_audit_reports,
     count_audit_reports,
     get_deployment_by_project,
+    list_invoices,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -51,11 +52,15 @@ from models import (
     DiscountRequest,
     DomainChoice,
     FindingSeverity,
+    Invoice,
+    InvoiceStatus,
     ProjectSpec,
     ProjectState,
     QuoteStatus,
     SignRequest,
     StartProjectRequest,
+    Subscription,
+    SubscriptionStatus,
     TaskKind,
     TaskStatus,
 )
@@ -188,6 +193,7 @@ async def decide_approval(approval_id: str, decision: str, decided_by: str) -> d
 
     if approval.type == ApprovalType.DEPLOY_PRODUCTION:
         from agents.technical_ops import execute_deployment
+        from agents.billing_dunning import activate_subscription
         from database import get_deployment, save_deployment, update_project_state
         from models import DeploymentStatus
 
@@ -211,6 +217,11 @@ async def decide_approval(approval_id: str, decision: str, decided_by: str) -> d
             approval_id, ApprovalStatus.APPROVED.value, decided_at, decided_by
         )
         result = await execute_deployment(approval_id)
+
+        project_id = approval.payload.get("project_id")
+        if project_id:
+            await activate_subscription(project_id)
+
         return {
             "approval_id": approval_id,
             "status": ApprovalStatus.APPROVED.value,
@@ -442,4 +453,42 @@ async def deploy_request(project_id: str, body: dict) -> dict:
         "approval_id": approval_id,
         "status": "PENDING_APPROVAL",
     }
+
+
+@app.post("/api/webhooks/payment/mock")
+async def payment_webhook(body: dict) -> dict:
+    invoice_id = body.get("invoice_id")
+    status = body.get("status")
+    if not invoice_id or status != "PAID":
+        raise HTTPException(status_code=400, detail="invoice_id and status=PAID required")
+
+    from agents.billing_dunning import process_payment
+    try:
+        invoice = await process_payment(invoice_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "invoice_id": invoice.invoice_id,
+        "status": invoice.status.value,
+        "paid_at": invoice.paid_at,
+    }
+
+
+@app.post("/api/billing/dunning/run")
+async def run_dunning() -> list[dict]:
+    from agents.billing_dunning import run_dunning_sop
+    actions = await run_dunning_sop()
+    return actions
+
+
+@app.get("/api/project/{project_id}/billing/invoices")
+async def get_project_invoices(project_id: str) -> list[dict]:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from database import list_invoices
+    invoices = await list_invoices(project_id)
+    return [inv.model_dump() for inv in invoices]
 

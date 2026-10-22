@@ -64,6 +64,7 @@ async def request_deployment(
         type=ApprovalType.DEPLOY_PRODUCTION,
         payload={
             "deployment_id": deployment_id,
+            "project_id": project_id,
             "domain_choice": domain_choice.value,
             "custom_domain_url": custom_domain_url,
             "hosted_url": hosted_url,

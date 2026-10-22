@@ -13,6 +13,7 @@ class ProjectState(str, Enum):
     APPROVED = "APPROVED"
     DEPLOYED = "DEPLOYED"
     SUBSCRIPTION = "SUBSCRIPTION"
+    SUSPENDED = "SUSPENDED"
     CHURNED = "CHURNED"
 
 
@@ -26,6 +27,8 @@ _LINEAR = (
     ProjectState.APPROVED,
     ProjectState.DEPLOYED,
     ProjectState.SUBSCRIPTION,
+    ProjectState.SUSPENDED,
+    ProjectState.CHURNED,
 )
 
 ALLOWED_TRANSITIONS: dict[ProjectState, frozenset[ProjectState]] = {
@@ -232,4 +235,34 @@ class DeploymentRequest(BaseModel):
     hosted_url: str | None = None
     status: DeploymentStatus = DeploymentStatus.PENDING_APPROVAL
     created_at: str
+
+
+class InvoiceStatus(str, Enum):
+    PENDING = "PENDING"
+    PAID = "PAID"
+    OVERDUE = "OVERDUE"
+    CANCELLED = "CANCELLED"
+
+
+class SubscriptionStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+    CHURNED = "CHURNED"
+
+
+class Invoice(BaseModel):
+    invoice_id: str
+    project_id: str
+    amount: int
+    due_date: str
+    status: InvoiceStatus = InvoiceStatus.PENDING
+    paid_at: str | None = None
+
+
+class Subscription(BaseModel):
+    subscription_id: str
+    project_id: str
+    monthly_fee: int
+    status: SubscriptionStatus = SubscriptionStatus.ACTIVE
+    current_invoice_id: str | None = None
 

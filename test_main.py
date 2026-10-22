@@ -993,5 +993,3 @@ def test_security_telegram_founder_lock_founder(client, monkeypatch):
     approval = next((a for a in pending if a["approval_id"] == approval_id), None)
     assert approval is None or approval["status"] == "APPROVED"
 
-
-

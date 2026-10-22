@@ -1,8 +1,9 @@
 import json
+from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription
 
 DB_PATH = "rakitdigital.db"
 
@@ -136,6 +137,32 @@ async def init_db() -> None:
                 hosted_url TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS invoices (
+                invoice_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                due_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                paid_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                subscription_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                monthly_fee INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                current_invoice_id TEXT
             )
             """
         )
@@ -736,3 +763,126 @@ async def get_deployment_by_project(project_id: str) -> DeploymentRequest | None
         if row is None:
             return None
         return _row_to_deployment(row)
+
+
+def _row_to_invoice(row: aiosqlite.Row) -> Invoice:
+    return Invoice.model_validate(
+        {
+            "invoice_id": row["invoice_id"],
+            "project_id": row["project_id"],
+            "amount": row["amount"],
+            "due_date": row["due_date"],
+            "status": row["status"],
+            "paid_at": row["paid_at"],
+        }
+    )
+
+
+async def save_invoice(invoice: Invoice) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO invoices (
+                invoice_id, project_id, amount, due_date, status, paid_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(invoice_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                amount = excluded.amount,
+                due_date = excluded.due_date,
+                status = excluded.status,
+                paid_at = excluded.paid_at
+            """,
+            (
+                invoice.invoice_id,
+                invoice.project_id,
+                invoice.amount,
+                invoice.due_date,
+                invoice.status.value,
+                invoice.paid_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_invoice(invoice_id: str) -> Invoice | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM invoices WHERE invoice_id = ?",
+            (invoice_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_invoice(row)
+
+
+async def list_invoices(project_id: str) -> list[Invoice]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM invoices WHERE project_id = ? ORDER BY due_date ASC",
+            (project_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_invoice(row) for row in rows]
+
+
+async def get_overdue_invoices() -> list[Invoice]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM invoices WHERE status = 'PENDING' AND due_date < ?",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_invoice(row) for row in rows]
+
+
+def _row_to_subscription(row: aiosqlite.Row) -> Subscription:
+    return Subscription.model_validate(
+        {
+            "subscription_id": row["subscription_id"],
+            "project_id": row["project_id"],
+            "monthly_fee": row["monthly_fee"],
+            "status": row["status"],
+            "current_invoice_id": row["current_invoice_id"],
+        }
+    )
+
+
+async def save_subscription(subscription: Subscription) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO subscriptions (
+                subscription_id, project_id, monthly_fee, status, current_invoice_id
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(subscription_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                monthly_fee = excluded.monthly_fee,
+                status = excluded.status,
+                current_invoice_id = excluded.current_invoice_id
+            """,
+            (
+                subscription.subscription_id,
+                subscription.project_id,
+                subscription.monthly_fee,
+                subscription.status.value,
+                subscription.current_invoice_id,
+            ),
+        )
+        await db.commit()
+
+
+async def get_subscription(project_id: str) -> Subscription | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM subscriptions WHERE project_id = ?",
+            (project_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_subscription(row)

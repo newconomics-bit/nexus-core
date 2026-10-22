@@ -1,5 +1,6 @@
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -723,7 +724,7 @@ def test_deploy_approve_full_flow(client):
     assert body["deployment"]["live_url"].endswith(".rakitdigital.app")
 
     state = _project_state(project_id)
-    assert state == "DEPLOYED"
+    assert state == "SUBSCRIPTION"
 
 
 def test_deploy_reject_keeps_approved_state(client):
@@ -751,6 +752,158 @@ def test_deploy_reject_keeps_approved_state(client):
     pending = client.get("/api/approvals/pending").json()
     dep_approvals = [a for a in pending if a["type"] == "DEPLOY_PRODUCTION" and a["project_id"] == project_id]
     assert len(dep_approvals) == 0
+
+
+def _deployed_project(client) -> str:
+    project_id = _approved_project(client)
+    deploy_resp = client.post(
+        f"/api/project/{project_id}/deploy/request",
+        json={"domain_choice": "HOSTED"},
+    )
+    assert deploy_resp.status_code == 200
+    approval_id = deploy_resp.json()["approval_id"]
+    decide_resp = client.post(
+        f"/api/approvals/{approval_id}/decide",
+        json={"decision": "APPROVED", "decided_by": "MUHAMMAD MUFTI ZAKA"},
+    )
+    assert decide_resp.status_code == 200
+    assert decide_resp.json()["deployment"]["status"] == "DEPLOYED"
+    assert _project_state(project_id) == "SUBSCRIPTION"
+    return project_id
+
+
+def test_billing_activate_subscription_on_deploy(client):
+    project_id = _deployed_project(client)
+    state = _project_state(project_id)
+    assert state == "SUBSCRIPTION"
+
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    assert len(invoices) == 1
+    assert invoices[0]["status"] == "PENDING"
+    assert invoices[0]["amount"] == 150000
+
+
+def test_billing_mock_payment_creates_next_invoice(client):
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    invoice_id = invoices[0]["invoice_id"]
+
+    webhook_resp = client.post(
+        "/api/webhooks/payment/mock",
+        json={"invoice_id": invoice_id, "status": "PAID"},
+    )
+    assert webhook_resp.status_code == 200
+    assert webhook_resp.json()["status"] == "PAID"
+
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    assert len(invoices) == 2
+    assert invoices[0]["status"] == "PAID"
+    assert invoices[1]["status"] == "PENDING"
+    assert invoices[1]["amount"] == 150000
+
+
+def test_dunning_h3_reminder(client):
+    # Clean up any existing invoices/subscriptions from previous tests
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM subscriptions")
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE invoices SET due_date = ? WHERE project_id = ? AND status = 'PENDING'",
+            ((datetime.now(timezone.utc) - timedelta(days=4)).isoformat(), project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    actions = client.post("/api/billing/dunning/run").json()
+    reminder_actions = [a for a in actions if a["action"] == "REMINDER_SENT"]
+    assert len(reminder_actions) == 1
+    assert "Wati: Kirim WA Reminder" in reminder_actions[0]["message"]
+
+    state = _project_state(project_id)
+    assert state == "SUBSCRIPTION"
+
+
+def test_dunning_h7_suspend(client):
+    # Clean up any existing invoices/subscriptions from previous tests
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM subscriptions")
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE invoices SET due_date = ? WHERE project_id = ? AND status = 'PENDING'",
+            ((datetime.now(timezone.utc) - timedelta(days=8)).isoformat(), project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    actions = client.post("/api/billing/dunning/run").json()
+    suspend_actions = [a for a in actions if a["action"] == "SUSPENDED"]
+    assert len(suspend_actions) == 1
+    assert "Om Tono: Suspend website" in suspend_actions[0]["message"]
+
+    state = _project_state(project_id)
+    assert state == "SUSPENDED"
+
+
+def test_dunning_h30_churn(client):
+    # Clean up any existing invoices/subscriptions from previous tests
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM subscriptions")
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE invoices SET due_date = ? WHERE project_id = ? AND status = 'PENDING'",
+            ((datetime.now(timezone.utc) - timedelta(days=31)).isoformat(), project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    actions = client.post("/api/billing/dunning/run").json()
+    churn_actions = [a for a in actions if a["action"] == "CHURNED"]
+    assert len(churn_actions) == 1
+    assert "Om Tono: Hapus server & DB" in churn_actions[0]["message"]
+
+    state = _project_state(project_id)
+    assert state == "CHURNED"
 
 
 

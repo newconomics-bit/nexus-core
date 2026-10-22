@@ -1,6 +1,6 @@
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
@@ -13,17 +13,23 @@ from agents.finance_costing import (
     calculate_quote,
     estimate_effort,
 )
+from agents.payment_verification import generate_qris, handle_qris_webhook, VerificationResult
 from core.telegram_bot import send_approval_card, send_access_denied_message
 from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity
+from core.scheduler import run_scheduler_tick
 from database import (
     create_project,
     get_approval,
+    get_invoice,
     get_latest_quote,
     get_project,
+    get_qris,
+    get_qris_by_invoice,
     get_quote,
     init_db,
     list_pending_approvals,
     save_approval,
+    save_ledger_entry,
     save_quote,
     update_approval_status,
     update_project_state,
@@ -55,8 +61,11 @@ from models import (
     FindingSeverity,
     Invoice,
     InvoiceStatus,
+    MockLedgerEntry,
     ProjectSpec,
     ProjectState,
+    QrisRequest,
+    QrisStatus,
     QuoteStatus,
     SignRequest,
     StartProjectRequest,
@@ -154,6 +163,7 @@ async def discount_quote(project_id: str, quote_id: str, body: DiscountRequest):
         raise HTTPException(status_code=400, detail="DISCOUNT_HARD_CAP")
     if body.discount_pct > 10 and not body.founder_approved:
         projected = apply_discount(quote, body.discount_pct, founder_approved=True)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
         approval = ApprovalRequest(
             approval_id=str(uuid.uuid4()),
             project_id=project_id,
@@ -166,12 +176,13 @@ async def discount_quote(project_id: str, quote_id: str, body: DiscountRequest):
             },
             status=ApprovalStatus.PENDING,
             requested_at=datetime.now(timezone.utc).isoformat(),
+            expires_at=expires_at.isoformat(),
         )
         await save_approval(approval)
         await send_approval_card(approval)
         return JSONResponse(
             status_code=202,
-            content={"status": "ESCALATED", "approval_id": approval.approval_id},
+            content={"status": "ESCALATED", "approval_id": approval.approval_id, "expires_at": expires_at.isoformat()},
         )
     try:
         updated = apply_discount(quote, body.discount_pct, body.founder_approved)
@@ -511,4 +522,94 @@ async def get_project_invoices(project_id: str) -> list[dict]:
     from database import list_invoices
     invoices = await list_invoices(project_id)
     return [inv.model_dump() for inv in invoices]
+
+
+@app.post("/api/billing/invoices/{invoice_id}/qris")
+async def generate_qris_endpoint(invoice_id: str) -> dict:
+    invoice = await get_invoice(invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.status != InvoiceStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Invoice is not pending")
+
+    existing_qris = await get_qris_by_invoice(invoice_id)
+    if existing_qris and existing_qris.status == QrisStatus.ACTIVE:
+        return {
+            "qris_id": existing_qris.qris_id,
+            "qr_string": existing_qris.qr_string,
+            "amount": existing_qris.amount,
+            "expires_at": existing_qris.expires_at,
+        }
+
+    qris = await generate_qris(invoice)
+    return {
+        "qris_id": qris.qris_id,
+        "qr_string": qris.qr_string,
+        "amount": qris.amount,
+        "expires_at": qris.expires_at,
+    }
+
+
+@app.get("/api/billing/invoices/{invoice_id}/qris")
+async def get_qris_endpoint(invoice_id: str) -> dict:
+    invoice = await get_invoice(invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    qris = await get_qris_by_invoice(invoice_id)
+    if qris is None:
+        raise HTTPException(status_code=404, detail="QRIS not found for this invoice")
+
+    return {
+        "qris_id": qris.qris_id,
+        "qr_string": qris.qr_string,
+        "amount": qris.amount,
+        "expires_at": qris.expires_at,
+        "status": qris.status.value,
+    }
+
+
+@app.post("/api/mock/qris/simulate_scan")
+async def simulate_qris_scan(body: dict) -> dict:
+    qris_id = body.get("qris_id")
+    paid_amount = body.get("paid_amount")
+
+    if not qris_id or paid_amount is None:
+        raise HTTPException(status_code=400, detail="qris_id and paid_amount required")
+
+    qris = await get_qris(qris_id)
+    if not qris:
+        raise HTTPException(status_code=404, detail="QRIS not found")
+
+    reference_code = f"REF-{uuid.uuid4().hex[:12].upper()}"
+
+    result, message = await handle_qris_webhook(reference_code, qris_id, paid_amount)
+
+    return {
+        "verification_result": result.value,
+        "message": message,
+        "reference_code": reference_code,
+    }
+
+
+@app.post("/api/webhooks/qris", dependencies=[Depends(verify_telegram_secret)])
+async def qris_webhook(payload: dict) -> dict:
+    reference_code = payload.get("reference_code")
+    qris_id = payload.get("qris_id")
+    amount = payload.get("amount")
+
+    if not all([reference_code, qris_id, amount is not None]):
+        raise HTTPException(status_code=400, detail="reference_code, qris_id, amount required")
+
+    result, message = await handle_qris_webhook(reference_code, qris_id, amount)
+
+    return {
+        "verification_result": result.value,
+        "message": message,
+    }
+
+
+@app.post("/api/scheduler/tick")
+async def scheduler_tick() -> dict:
+    return await run_scheduler_tick()
 

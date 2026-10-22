@@ -127,6 +127,19 @@ def _quote_row(quote_id: str):
         connection.close()
 
 
+def _latest_quote_id(project_id: str) -> str:
+    connection = sqlite3.connect(DB_PATH)
+    try:
+        row = connection.execute(
+            "SELECT quote_id FROM quotes WHERE project_id = ? ORDER BY version DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return row[0]
+
+
 def _project_state(project_id: str) -> str:
     connection = sqlite3.connect(DB_PATH)
     try:
@@ -148,7 +161,7 @@ def test_generate_quote_matches_cost_plus_math(client):
     assert body["hpp_breakdown"]["labor_hours"] == 16
     assert body["hpp_breakdown"]["infra_cost"] == 150000
     assert body["hpp_breakdown"]["labor_rate"] == 75000
-    assert body["hpp_breakdown"]["total_hpp"] == 1350000
+    assert body["hpp_breakdown"]["total_hpp"] == 1360000
     assert body["margin_pct"] == 75
     assert body["final_price"] == 2400000
     assert body["version"] == 1
@@ -225,7 +238,7 @@ def _fresh_quote(client):
 
 def test_margin_ceil_rounds_price_up(client):
     _project_id, quote = _fresh_quote(client)
-    assert quote["hpp_breakdown"]["total_hpp"] == 1350000
+    assert quote["hpp_breakdown"]["total_hpp"] == 1360000
     assert quote["final_price"] == 2400000
 
 
@@ -992,4 +1005,219 @@ def test_security_telegram_founder_lock_founder(client, monkeypatch):
     pending = client.get("/api/approvals/pending").json()
     approval = next((a for a in pending if a["approval_id"] == approval_id), None)
     assert approval is None or approval["status"] == "APPROVED"
+
+
+def _project_with_invoice(client) -> tuple[str, str]:
+    """Create a project, deploy it, and return (project_id, invoice_id) with PENDING invoice."""
+    project_id = _deployed_project(client)
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    assert len(invoices) == 1
+    assert invoices[0]["status"] == "PENDING"
+    return project_id, invoices[0]["invoice_id"]
+
+
+def test_qris_generate_amount_locked_to_invoice(client):
+    project_id, invoice_id = _project_with_invoice(client)
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    invoice_amount = invoices[0]["amount"]
+
+    response = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["amount"] == invoice_amount
+    assert "qris_id" in body
+    assert "qr_string" in body
+    assert "expires_at" in body
+
+    # Verify QRIS stored in DB
+    qris_resp = client.get(f"/api/billing/invoices/{invoice_id}/qris")
+    assert qris_resp.status_code == 200
+    assert qris_resp.json()["amount"] == invoice_amount
+
+
+def test_qris_simulate_scan_nominal_pas_invoice_paid(client):
+    project_id, invoice_id = _project_with_invoice(client)
+
+    qris_resp = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    qris_id = qris_resp.json()["qris_id"]
+
+    scan_resp = client.post(
+        "/api/mock/qris/simulate_scan",
+        json={"qris_id": qris_id, "paid_amount": 150000},
+    )
+    assert scan_resp.status_code == 200
+    body = scan_resp.json()
+    assert body["verification_result"] == "VERIFIED"
+
+    # Invoice should be PAID
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    assert len(invoices) == 2
+    assert invoices[0]["status"] == "PAID"
+    assert invoices[0]["invoice_id"] == invoice_id
+    assert invoices[1]["status"] == "PENDING"  # Next month invoice
+
+
+def test_qris_simulate_scan_nominal_selisih_payment_exception(client):
+    project_id, invoice_id = _project_with_invoice(client)
+
+    qris_resp = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    qris_id = qris_resp.json()["qris_id"]
+
+    # Pay wrong amount (150001 instead of 150000)
+    scan_resp = client.post(
+        "/api/mock/qris/simulate_scan",
+        json={"qris_id": qris_id, "paid_amount": 150001},
+    )
+    assert scan_resp.status_code == 200
+    body = scan_resp.json()
+    assert body["verification_result"] == "AMOUNT_MISMATCH"
+    assert "selisih" in body["message"].lower()
+
+    # Invoice should be PAYMENT_EXCEPTION, not PAID
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    assert len(invoices) == 1  # No next invoice created
+    assert invoices[0]["status"] == "PAYMENT_EXCEPTION"
+    assert invoices[0]["invoice_id"] == invoice_id
+
+
+def test_qris_webhook_duplicate_idempotent(client):
+    project_id, invoice_id = _project_with_invoice(client)
+
+    qris_resp = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    qris_id = qris_resp.json()["qris_id"]
+
+    # First scan
+    scan1 = client.post(
+        "/api/mock/qris/simulate_scan",
+        json={"qris_id": qris_id, "paid_amount": 150000},
+    )
+    assert scan1.status_code == 200
+    ref_code = scan1.json()["reference_code"]
+
+    # Second scan with same reference code (simulated via direct webhook call)
+    headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_WEBHOOK_SECRET}
+    scan2 = client.post(
+        "/api/webhooks/qris",
+        json={"reference_code": ref_code, "qris_id": qris_id, "amount": 150000},
+        headers=headers,
+    )
+    assert scan2.status_code == 200
+    assert scan2.json()["verification_result"] == "DUPLICATE"
+
+    # Should still have only 2 invoices (original PAID + next month)
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    assert len(invoices) == 2
+    assert invoices[0]["status"] == "PAID"
+
+
+def test_discount_15_percent_5_min_timeout_auto_rejected(client, monkeypatch):
+    project_id = _approved_project(client)
+    quote_id = _latest_quote_id(project_id)
+
+    # Request 15% discount (requires approval)
+    disc_resp = client.post(
+        f"/api/project/{project_id}/quote/{quote_id}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    )
+    assert disc_resp.status_code == 202
+    approval_id = disc_resp.json()["approval_id"]
+
+    # Verify approval is PENDING with expires_at
+    pending = client.get("/api/approvals/pending").json()
+    approval = next(a for a in pending if a["approval_id"] == approval_id)
+    assert approval["status"] == "PENDING"
+    assert "expires_at" in approval
+
+    # Manually expire the approval by updating DB
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE approvals SET expires_at = ? WHERE approval_id = ?",
+            ((datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat(), approval_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Run scheduler tick
+    tick_resp = client.post("/api/scheduler/tick")
+    assert tick_resp.status_code == 200
+    body = tick_resp.json()
+    discount_results = body["discount_timeouts"]
+    # Find the result for our specific approval
+    our_result = next((r for r in discount_results if r["approval_id"] == approval_id), None)
+    assert our_result is not None
+    assert our_result["action"] == "AUTO_REJECTED"
+    assert "diskon maksimal untuk kali ini hanya 10%" in our_result["message"]
+
+    # Approval should be AUTO_REJECTED
+    pending = client.get("/api/approvals/pending").json()
+    approval = next((a for a in pending if a["approval_id"] == approval_id), None)
+    assert approval is None or approval["status"] == "AUTO_REJECTED"
+
+
+def test_discount_15_percent_manual_approve_before_timeout(client):
+    project_id = _approved_project(client)
+    quote_id = _latest_quote_id(project_id)
+
+    disc_resp = client.post(
+        f"/api/project/{project_id}/quote/{quote_id}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    )
+    assert disc_resp.status_code == 202
+    approval_id = disc_resp.json()["approval_id"]
+
+    # Founder approves before timeout
+    headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_WEBHOOK_SECRET}
+    decide_resp = client.post(
+        "/api/telegram/webhook",
+        json={
+            "callback_query": {
+                "data": f"APPROVE|{approval_id}",
+                "from": {"id": FOUNDER_CHAT_ID, "first_name": "MUHAMMAD MUFTI ZAKA"},
+            }
+        },
+        headers=headers,
+    )
+    assert decide_resp.status_code == 200
+    assert decide_resp.json()["status"] == "APPROVED"
+
+    # Approval should be APPROVED
+    pending = client.get("/api/approvals/pending").json()
+    approval = next((a for a in pending if a["approval_id"] == approval_id), None)
+    assert approval is None or approval["status"] == "APPROVED"
+
+
+def test_qris_expires_after_24_hours(client):
+    project_id, invoice_id = _project_with_invoice(client)
+
+    qris_resp = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    qris_id = qris_resp.json()["qris_id"]
+
+    # Manually expire the QRIS by updating DB
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE qris_requests SET expires_at = ? WHERE qris_id = ?",
+            ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(), qris_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Run scheduler tick
+    tick_resp = client.post("/api/scheduler/tick")
+    assert tick_resp.status_code == 200
+    body = tick_resp.json()
+    assert qris_id in body["expired_qris"]
+
+    # QRIS should be EXPIRED
+    qris_check = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    assert qris_check.status_code == 200
+    # Should generate new QRIS since old one expired
+    assert qris_check.json()["qris_id"] != qris_id
 

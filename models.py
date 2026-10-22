@@ -79,6 +79,7 @@ class HppBreakdown(BaseModel):
     infra_cost: int
     labor_hours: float
     labor_rate: int
+    qris_mdr: int
     total_hpp: int
 
 
@@ -116,6 +117,7 @@ class ApprovalStatus(str, Enum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    AUTO_REJECTED = "AUTO_REJECTED"
 
 
 class ApprovalRequest(BaseModel):
@@ -128,6 +130,7 @@ class ApprovalRequest(BaseModel):
     requested_at: str
     decided_at: str = ""
     decided_by: str = ""
+    expires_at: str | None = None
 
 
 class DecideRequest(BaseModel):
@@ -242,6 +245,7 @@ class InvoiceStatus(str, Enum):
     PAID = "PAID"
     OVERDUE = "OVERDUE"
     CANCELLED = "CANCELLED"
+    PAYMENT_EXCEPTION = "PAYMENT_EXCEPTION"
 
 
 class SubscriptionStatus(str, Enum):
@@ -265,4 +269,28 @@ class Subscription(BaseModel):
     monthly_fee: int
     status: SubscriptionStatus = SubscriptionStatus.ACTIVE
     current_invoice_id: str | None = None
+
+
+class QrisStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    PAID = "PAID"
+    EXPIRED = "EXPIRED"
+
+
+class QrisRequest(BaseModel):
+    qris_id: str
+    invoice_id: str
+    amount: int
+    qr_string: str
+    status: QrisStatus = QrisStatus.ACTIVE
+    created_at: str
+    expires_at: str
+
+
+class MockLedgerEntry(BaseModel):
+    entry_id: str
+    reference_code: str
+    qris_id: str
+    amount: int
+    paid_at: str
 

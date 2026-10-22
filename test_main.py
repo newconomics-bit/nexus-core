@@ -638,4 +638,119 @@ def test_audit_reports_ordered_by_cycle(client, monkeypatch):
     assert reports[2]["status"] == "ESCALATED"
 
 
+def _approved_project(client) -> str:
+    project_id = _audit_ready_project(client)
+    client.post(f"/api/project/{project_id}/audit/run")
+    assert _project_state(project_id) == "APPROVED"
+    return project_id
+
+
+def test_deploy_request_rejects_non_approved_state(client):
+    created = client.post("/api/project/start", json={"client_name": "Toko Maju"}).json()
+    response = client.post(
+        f"/api/project/{created['project_id']}/deploy/request",
+        json={"domain_choice": "HOSTED"},
+    )
+    assert response.status_code == 400
+
+
+def test_deploy_request_hosted_generates_url_and_approval(client):
+    project_id = _approved_project(client)
+    response = client.post(
+        f"/api/project/{project_id}/deploy/request",
+        json={"domain_choice": "HOSTED"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PENDING_APPROVAL"
+    assert "deployment_id" in body
+    assert "approval_id" in body
+
+    pending = client.get("/api/approvals/pending").json()
+    dep_approvals = [a for a in pending if a["type"] == "DEPLOY_PRODUCTION" and a["project_id"] == project_id]
+    assert len(dep_approvals) == 1
+    assert dep_approvals[0]["payload"]["hosted_url"].endswith(".rakitdigital.app")
+    assert dep_approvals[0]["payload"]["domain_choice"] == "HOSTED"
+
+
+def test_deploy_request_custom_requires_url(client):
+    project_id = _approved_project(client)
+    response = client.post(
+        f"/api/project/{project_id}/deploy/request",
+        json={"domain_choice": "CUSTOM"},
+    )
+    assert response.status_code == 400
+
+
+def test_deploy_request_custom_generates_approval(client):
+    project_id = _approved_project(client)
+    response = client.post(
+        f"/api/project/{project_id}/deploy/request",
+        json={"domain_choice": "CUSTOM", "custom_domain_url": "https://myapp.example.com"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PENDING_APPROVAL"
+    assert "deployment_id" in body
+    assert "approval_id" in body
+
+    pending = client.get("/api/approvals/pending").json()
+    dep_approvals = [a for a in pending if a["type"] == "DEPLOY_PRODUCTION" and a["project_id"] == project_id]
+    assert len(dep_approvals) == 1
+    assert dep_approvals[0]["payload"]["custom_domain_url"] == "https://myapp.example.com"
+    assert dep_approvals[0]["payload"]["domain_choice"] == "CUSTOM"
+
+
+def test_deploy_approve_full_flow(client):
+    project_id = _approved_project(client)
+    deploy_resp = client.post(
+        f"/api/project/{project_id}/deploy/request",
+        json={"domain_choice": "HOSTED"},
+    )
+    assert deploy_resp.status_code == 200
+    deployment_id = deploy_resp.json()["deployment_id"]
+    approval_id = deploy_resp.json()["approval_id"]
+
+    decide_resp = client.post(
+        f"/api/approvals/{approval_id}/decide",
+        json={"decision": "APPROVED", "decided_by": "MUHAMMAD MUFTI ZAKA"},
+    )
+    assert decide_resp.status_code == 200
+    body = decide_resp.json()
+    assert body["status"] == "APPROVED"
+    assert "deployment" in body
+    assert body["deployment"]["status"] == "DEPLOYED"
+    assert body["deployment"]["live_url"].endswith(".rakitdigital.app")
+
+    state = _project_state(project_id)
+    assert state == "DEPLOYED"
+
+
+def test_deploy_reject_keeps_approved_state(client):
+    project_id = _approved_project(client)
+    deploy_resp = client.post(
+        f"/api/project/{project_id}/deploy/request",
+        json={"domain_choice": "CUSTOM", "custom_domain_url": "https://myapp.example.com"},
+    )
+    assert deploy_resp.status_code == 200
+    deployment_id = deploy_resp.json()["deployment_id"]
+    approval_id = deploy_resp.json()["approval_id"]
+
+    decide_resp = client.post(
+        f"/api/approvals/{approval_id}/decide",
+        json={"decision": "REJECTED", "decided_by": "MUHAMMAD MUFTI ZAKA"},
+    )
+    assert decide_resp.status_code == 200
+    body = decide_resp.json()
+    assert body["status"] == "REJECTED"
+    assert body["deployment_id"] == deployment_id
+
+    state = _project_state(project_id)
+    assert state == "APPROVED"
+
+    pending = client.get("/api/approvals/pending").json()
+    dep_approvals = [a for a in pending if a["type"] == "DEPLOY_PRODUCTION" and a["project_id"] == project_id]
+    assert len(dep_approvals) == 0
+
+
 

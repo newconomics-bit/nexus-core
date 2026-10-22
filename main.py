@@ -31,6 +31,7 @@ from database import (
     save_build_task,
     list_audit_reports,
     count_audit_reports,
+    get_deployment_by_project,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -45,7 +46,10 @@ from models import (
     BuildTask,
     ChatRequest,
     DecideRequest,
+    DeploymentRequest,
+    DeploymentStatus,
     DiscountRequest,
+    DomainChoice,
     FindingSeverity,
     ProjectSpec,
     ProjectState,
@@ -181,6 +185,38 @@ async def decide_approval(approval_id: str, decision: str, decided_by: str) -> d
         raise HTTPException(status_code=409, detail="APPROVAL_ALREADY_DECIDED")
 
     decided_at = datetime.now(timezone.utc).isoformat()
+
+    if approval.type == ApprovalType.DEPLOY_PRODUCTION:
+        from agents.technical_ops import execute_deployment
+        from database import get_deployment, save_deployment, update_project_state
+        from models import DeploymentStatus
+
+        if decision == "REJECTED":
+            await update_approval_status(
+                approval_id, ApprovalStatus.REJECTED.value, decided_at, decided_by
+            )
+            deployment_id = approval.payload.get("deployment_id")
+            if deployment_id:
+                deployment = await get_deployment(deployment_id)
+                if deployment:
+                    deployment.status = DeploymentStatus.REJECTED
+                    await save_deployment(deployment)
+            return {
+                "approval_id": approval_id,
+                "status": ApprovalStatus.REJECTED.value,
+                "deployment_id": deployment_id,
+            }
+
+        await update_approval_status(
+            approval_id, ApprovalStatus.APPROVED.value, decided_at, decided_by
+        )
+        result = await execute_deployment(approval_id)
+        return {
+            "approval_id": approval_id,
+            "status": ApprovalStatus.APPROVED.value,
+            "deployment": result,
+        }
+
     if decision == "REJECTED":
         await update_approval_status(
             approval_id, ApprovalStatus.REJECTED.value, decided_at, decided_by
@@ -376,4 +412,34 @@ async def audit_reports(project_id: str) -> list[dict]:
     from database import list_audit_reports
     reports = await list_audit_reports(project_id)
     return [r.model_dump() for r in reports]
+
+
+@app.post("/api/project/{project_id}/deploy/request")
+async def deploy_request(project_id: str, body: dict) -> dict:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project["state"] != ProjectState.APPROVED.value:
+        raise HTTPException(status_code=400, detail="Project must be in APPROVED state")
+
+    domain_choice_str = body.get("domain_choice")
+    if domain_choice_str not in ("HOSTED", "CUSTOM"):
+        raise HTTPException(status_code=400, detail="domain_choice must be HOSTED or CUSTOM")
+    domain_choice = DomainChoice(domain_choice_str)
+
+    custom_domain_url = body.get("custom_domain_url")
+    if domain_choice == DomainChoice.CUSTOM and not custom_domain_url:
+        raise HTTPException(status_code=400, detail="custom_domain_url required for CUSTOM domain")
+
+    from agents.technical_ops import request_deployment
+    try:
+        deployment_id, approval_id = await request_deployment(project_id, domain_choice, custom_domain_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "deployment_id": deployment_id,
+        "approval_id": approval_id,
+        "status": "PENDING_APPROVAL",
+    }
 

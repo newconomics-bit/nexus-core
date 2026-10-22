@@ -2,7 +2,7 @@ import json
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest
 
 DB_PATH = "rakitdigital.db"
 
@@ -118,6 +118,22 @@ async def init_db() -> None:
                 submission_id TEXT NOT NULL,
                 cycle INTEGER NOT NULL,
                 findings TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deployments (
+                deployment_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                domain_choice TEXT NOT NULL,
+                custom_domain_url TEXT,
+                hosted_url TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
@@ -652,3 +668,71 @@ async def count_audit_reports(project_id: str) -> int:
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+
+def _row_to_deployment(row: aiosqlite.Row) -> DeploymentRequest:
+    return DeploymentRequest.model_validate(
+        {
+            "deployment_id": row["deployment_id"],
+            "project_id": row["project_id"],
+            "domain_choice": row["domain_choice"],
+            "custom_domain_url": row["custom_domain_url"],
+            "hosted_url": row["hosted_url"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+        }
+    )
+
+
+async def save_deployment(deployment: DeploymentRequest) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO deployments (
+                deployment_id, project_id, domain_choice, custom_domain_url, hosted_url, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(deployment_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                domain_choice = excluded.domain_choice,
+                custom_domain_url = excluded.custom_domain_url,
+                hosted_url = excluded.hosted_url,
+                status = excluded.status,
+                created_at = excluded.created_at
+            """,
+            (
+                deployment.deployment_id,
+                deployment.project_id,
+                deployment.domain_choice.value,
+                deployment.custom_domain_url,
+                deployment.hosted_url,
+                deployment.status.value,
+                deployment.created_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_deployment(deployment_id: str) -> DeploymentRequest | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM deployments WHERE deployment_id = ?",
+            (deployment_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_deployment(row)
+
+
+async def get_deployment_by_project(project_id: str) -> DeploymentRequest | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM deployments WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+            (project_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_deployment(row)

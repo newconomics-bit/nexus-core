@@ -430,4 +430,212 @@ def test_circuit_breaker_blocks_after_3_failures(client, monkeypatch):
     assert status["done"] == 0
 
 
+def _audit_ready_project(client) -> str:
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+    client.post(f"/api/project/{project_id}/build/run")
+    return project_id
+
+
+def test_audit_run_rejects_non_auditing_state(client):
+    created = client.post("/api/project/start", json={"client_name": "Toko Maju"}).json()
+    response = client.post(f"/api/project/{created['project_id']}/audit/run")
+    assert response.status_code == 400
+
+
+def test_audit_clean_artifacts_passed(client):
+    project_id = _audit_ready_project(client)
+    response = client.post(f"/api/project/{project_id}/audit/run")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASSED"
+    assert body["cycle"] == 1
+    assert len(body["findings"]) == 0
+
+    state = _project_state(project_id)
+    assert state == "APPROVED"
+
+    reports = client.get(f"/api/project/{project_id}/audit/reports").json()
+    assert len(reports) == 1
+    assert reports[0]["cycle"] == 1
+    assert reports[0]["status"] == "PASSED"
+
+
+def test_audit_finds_critical_password(client, monkeypatch):
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def dirty_backend(*args, **kwargs):
+        from models import BuildArtifact, TaskStatus
+        import uuid
+        from datetime import datetime, timezone
+        task = args[0]
+        spec = args[1]
+        artifact = BuildArtifact(
+            artifact_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename="backend_feature.py",
+            content="password = 'admin123'\napi_key = 'secret123'\nprint('hello')",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        from database import save_build_artifact
+        await save_build_artifact(artifact)
+        task.status = TaskStatus.DONE
+        task.artifact_id = artifact.artifact_id
+        from database import save_build_task
+        await save_build_task(task)
+        return artifact
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "execute_task", dirty_backend)
+
+    client.post(f"/api/project/{project_id}/build/run")
+    response = client.post(f"/api/project/{project_id}/audit/run")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "FAILED"
+    assert body["cycle"] == 1
+    assert any(f["severity"] == "CRITICAL" for f in body["findings"])
+    assert any("password" in f["description"].lower() for f in body["findings"])
+
+    state = _project_state(project_id)
+    assert state == "BUILDING"
+
+
+def test_audit_rework_loop_three_cycles_blocked(client, monkeypatch):
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def dirty_backend(*args, **kwargs):
+        from models import BuildArtifact, TaskStatus
+        import uuid
+        from datetime import datetime, timezone
+        task = args[0]
+        spec = args[1]
+        artifact = BuildArtifact(
+            artifact_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename="backend_feature.py",
+            content="password = 'admin123'\napi_key = 'secret123'\nprint('hello')",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        from database import save_build_artifact
+        await save_build_artifact(artifact)
+        task.status = TaskStatus.DONE
+        task.artifact_id = artifact.artifact_id
+        from database import save_build_task
+        await save_build_task(task)
+        return artifact
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "execute_task", dirty_backend)
+
+    for cycle in range(1, 4):
+        build_resp = client.post(f"/api/project/{project_id}/build/run")
+        assert build_resp.status_code == 200
+
+        audit_resp = client.post(f"/api/project/{project_id}/audit/run")
+        assert audit_resp.status_code == 200
+        body = audit_resp.json()
+        assert body["cycle"] == cycle
+
+    assert body["status"] == "ESCALATED"
+    assert body["cycle"] == 3
+
+    state = _project_state(project_id)
+    assert state == "BLOCKED"
+
+    pending = client.get("/api/approvals/pending").json()
+    qa_esc = [a for a in pending if a["type"] == "QA_ESCALATION" and a["project_id"] == project_id]
+    assert len(qa_esc) == 1
+    assert qa_esc[0]["status"] == "PENDING"
+
+
+def test_audit_medium_only_passed(client, monkeypatch):
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def medium_artifact(*args, **kwargs):
+        from models import BuildArtifact, TaskStatus
+        import uuid
+        from datetime import datetime, timezone
+        task = args[0]
+        spec = args[1]
+        artifact = BuildArtifact(
+            artifact_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename="config.py",
+            content="host = '0.0.0.0'\nport = 8000",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        from database import save_build_artifact
+        await save_build_artifact(artifact)
+        task.status = TaskStatus.DONE
+        task.artifact_id = artifact.artifact_id
+        from database import save_build_task
+        await save_build_task(task)
+        return artifact
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "execute_task", medium_artifact)
+
+    client.post(f"/api/project/{project_id}/build/run")
+    response = client.post(f"/api/project/{project_id}/audit/run")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASSED"
+    assert body["cycle"] == 1
+    assert any(f["severity"] == "MEDIUM" for f in body["findings"])
+    assert not any(f["severity"] in ("CRITICAL", "HIGH") for f in body["findings"])
+
+    state = _project_state(project_id)
+    assert state == "APPROVED"
+
+
+def test_audit_reports_ordered_by_cycle(client, monkeypatch):
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def dirty_backend(*args, **kwargs):
+        from models import BuildArtifact, TaskStatus
+        import uuid
+        from datetime import datetime, timezone
+        task = args[0]
+        spec = args[1]
+        artifact = BuildArtifact(
+            artifact_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename="backend_feature.py",
+            content="password = 'admin123'",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        from database import save_build_artifact
+        await save_build_artifact(artifact)
+        task.status = TaskStatus.DONE
+        task.artifact_id = artifact.artifact_id
+        from database import save_build_task
+        await save_build_task(task)
+        return artifact
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "execute_task", dirty_backend)
+
+    for _ in range(3):
+        client.post(f"/api/project/{project_id}/build/run")
+        client.post(f"/api/project/{project_id}/audit/run")
+
+    reports = client.get(f"/api/project/{project_id}/audit/reports").json()
+    assert len(reports) == 3
+    assert reports[0]["cycle"] == 1
+    assert reports[1]["cycle"] == 2
+    assert reports[2]["cycle"] == 3
+    assert reports[0]["status"] == "FAILED"
+    assert reports[1]["status"] == "FAILED"
+    assert reports[2]["status"] == "ESCALATED"
+
+
 

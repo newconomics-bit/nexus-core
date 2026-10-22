@@ -29,6 +29,8 @@ from database import (
     list_build_tasks,
     list_build_artifacts,
     save_build_task,
+    list_audit_reports,
+    count_audit_reports,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -36,10 +38,15 @@ from models import (
     ApprovalRequest,
     ApprovalStatus,
     ApprovalType,
+    AuditCategory,
+    AuditFinding,
+    AuditReport,
+    AuditReportStatus,
     BuildTask,
     ChatRequest,
     DecideRequest,
     DiscountRequest,
+    FindingSeverity,
     ProjectSpec,
     ProjectState,
     QuoteStatus,
@@ -191,7 +198,7 @@ async def decide_approval(approval_id: str, decision: str, decided_by: str) -> d
         raise HTTPException(status_code=404, detail="Quote not found")
     try:
         updated = apply_discount(
-            quote, int(approval.payload.discount_pct), founder_approved=True
+            quote, int(approval.payload["discount_pct"]), founder_approved=True
         )
     except DiscountHardCap:
         raise HTTPException(status_code=400, detail="DISCOUNT_HARD_CAP") from None
@@ -329,4 +336,44 @@ async def build_status(project_id: str) -> dict:
 
     from agents.engineering_build import get_build_status
     return await get_build_status(project_id)
+
+
+@app.post("/api/project/{project_id}/audit/run")
+async def audit_run(project_id: str) -> dict:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project["state"] != ProjectState.AUDITING.value:
+        raise HTTPException(status_code=400, detail="Project must be in AUDITING state")
+
+    from database import get_latest_quote, list_build_submissions
+    submissions = await list_build_submissions(project_id)
+    if not submissions:
+        raise HTTPException(status_code=400, detail="No build submission found")
+
+    latest_submission = submissions[0]
+
+    from agents.qa_audit import run_audit
+    report = await run_audit(project_id, latest_submission.submission_id)
+
+    response = report.model_dump()
+    if report.status == AuditReportStatus.ESCALATED:
+        from database import list_pending_approvals
+        pending = await list_pending_approvals()
+        qa_escalations = [a for a in pending if a.type == "QA_ESCALATION" and a.project_id == project_id]
+        if qa_escalations:
+            response["escalation_approval_id"] = qa_escalations[0].approval_id
+
+    return response
+
+
+@app.get("/api/project/{project_id}/audit/reports")
+async def audit_reports(project_id: str) -> list[dict]:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from database import list_audit_reports
+    reports = await list_audit_reports(project_id)
+    return [r.model_dump() for r in reports]
 

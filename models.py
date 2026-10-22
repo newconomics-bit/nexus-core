@@ -103,6 +103,7 @@ class ApprovalType(str, Enum):
     DISCOUNT_ESCALATION = "DISCOUNT_ESCALATION"
     DEPLOY = "DEPLOY"
     PAYMENT = "PAYMENT"
+    QA_ESCALATION = "QA_ESCALATION"
 
 
 class ApprovalStatus(str, Enum):
@@ -111,18 +112,12 @@ class ApprovalStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
-class ApprovalPayload(BaseModel):
-    discount_pct: int
-    final_price_before: int
-    final_price_after: int
-
-
 class ApprovalRequest(BaseModel):
     approval_id: str
     project_id: str
     quote_id: str
     type: ApprovalType
-    payload: ApprovalPayload
+    payload: dict
     status: ApprovalStatus
     requested_at: str
     decided_at: str = ""
@@ -172,4 +167,45 @@ class BuildSubmission(BaseModel):
     task_count: int
     created_at: str
     status: str = "READY_FOR_AUDIT"
+
+
+class AuditCategory(str, Enum):
+    OSINT = "OSINT"
+    SAST = "SAST"
+    DAST = "DAST"
+    DB_AUDIT = "DB_AUDIT"
+
+
+class FindingSeverity(str, Enum):
+    CRITICAL = "CRITICAL"
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
+class AuditFinding(BaseModel):
+    finding_id: str
+    project_id: str
+    submission_id: str
+    category: AuditCategory
+    severity: FindingSeverity
+    location: str
+    description: str
+    recommendation: str
+
+
+class AuditReportStatus(str, Enum):
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    ESCALATED = "ESCALATED"
+
+
+class AuditReport(BaseModel):
+    report_id: str
+    project_id: str
+    submission_id: str
+    cycle: int
+    findings: list[AuditFinding]
+    status: AuditReportStatus
+    created_at: str
 

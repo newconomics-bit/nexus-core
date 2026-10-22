@@ -334,4 +334,100 @@ def test_telegram_webhook_callback_decides_approval(client):
     assert _quote_row(quote["quote_id"])[0] == 2040000
 
 
+def _signed_project(client) -> str:
+    project_id = _quoted_project(client)
+    quote = client.post(f"/api/project/{project_id}/quote/generate").json()
+    signed = client.post(
+        f"/api/project/{project_id}/sign",
+        json={"quote_id": quote["quote_id"]},
+    )
+    assert signed.status_code == 200
+    assert signed.json()["state"] == "SIGNED"
+    return project_id
+
+
+def test_build_start_rejects_non_signed_state(client):
+    created = client.post("/api/project/start", json={"client_name": "Toko Maju"}).json()
+    response = client.post(f"/api/project/{created['project_id']}/build/start")
+    assert response.status_code == 400
+
+
+def test_build_start_signed_creates_tasks(client):
+    project_id = _signed_project(client)
+    response = client.post(f"/api/project/{project_id}/build/start")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_id"] == project_id
+    assert body["state"] == "BUILDING"
+    tasks = body["tasks"]
+    assert len(tasks) >= 3
+    kinds = {t["kind"] for t in tasks}
+    assert "FRONTEND" in kinds
+    assert "BACKEND" in kinds
+    assert "DATABASE" in kinds
+    for t in tasks:
+        assert t["status"] == "PENDING"
+        assert "task_id" in t
+
+
+def test_build_run_mock_mode_completes(client):
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+    response = client.post(f"/api/project/{project_id}/build/run")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "READY_FOR_AUDIT"
+    assert body["project_state"] == "AUDITING"
+    submission = body["submission"]
+    assert submission["status"] == "READY_FOR_AUDIT"
+    assert submission["task_count"] >= 3
+    assert len(submission["artifact_ids"]) == submission["task_count"]
+
+
+def test_build_status_shows_progress(client):
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+    response = client.get(f"/api/project/{project_id}/build/status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_id"] == project_id
+    assert body["project_state"] == "BUILDING"
+    assert body["total_tasks"] >= 3
+    assert body["pending"] == body["total_tasks"]
+    assert body["done"] == 0
+    assert body["failed"] == 0
+
+    client.post(f"/api/project/{project_id}/build/run")
+    response = client.get(f"/api/project/{project_id}/build/status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_state"] == "AUDITING"
+    assert body["pending"] == 0
+    assert body["done"] == body["total_tasks"]
+    assert body["failed"] == 0
+
+
+def test_circuit_breaker_blocks_after_3_failures(client, monkeypatch):
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def always_fail(*args, **kwargs):
+        raise Exception("LLM failed")
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "call_llm", always_fail)
+
+    response = client.post(f"/api/project/{project_id}/build/run")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "BLOCKED"
+    assert body["project_state"] == "BLOCKED"
+    assert "failed after 3 attempts" in body["submission"]["status"]
+
+    status = client.get(f"/api/project/{project_id}/build/status").json()
+    assert status["project_state"] == "BLOCKED"
+    assert status["failed"] >= 1
+    assert status["done"] == 0
+
+
 

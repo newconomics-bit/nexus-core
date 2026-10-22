@@ -2,7 +2,7 @@ import json
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask
 
 DB_PATH = "rakitdigital.db"
 
@@ -50,6 +50,46 @@ async def init_db() -> None:
                 requested_at TEXT NOT NULL,
                 decided_at TEXT NOT NULL DEFAULT '',
                 decided_by TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS build_tasks (
+                task_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                artifact_id TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS build_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS build_submissions (
+                submission_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                artifact_ids TEXT NOT NULL,
+                task_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL
             )
             """
         )
@@ -266,3 +306,191 @@ async def update_approval_status(
             (status, decided_at, decided_by, approval_id),
         )
         await db.commit()
+
+
+def _row_to_build_task(row: aiosqlite.Row) -> BuildTask:
+    return BuildTask.model_validate(
+        {
+            "task_id": row["task_id"],
+            "project_id": row["project_id"],
+            "kind": row["kind"],
+            "title": row["title"],
+            "status": row["status"],
+            "attempts": row["attempts"],
+            "artifact_id": row["artifact_id"],
+        }
+    )
+
+
+async def save_build_task(task: BuildTask) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO build_tasks (
+                task_id, project_id, kind, title, status, attempts, artifact_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                kind = excluded.kind,
+                title = excluded.title,
+                status = excluded.status,
+                attempts = excluded.attempts,
+                artifact_id = excluded.artifact_id
+            """,
+            (
+                task.task_id,
+                task.project_id,
+                task.kind.value,
+                task.title,
+                task.status.value,
+                task.attempts,
+                task.artifact_id,
+            ),
+        )
+        await db.commit()
+
+
+async def get_build_task(task_id: str) -> BuildTask | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM build_tasks WHERE task_id = ?",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_build_task(row)
+
+
+async def list_build_tasks(project_id: str) -> list[BuildTask]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM build_tasks WHERE project_id = ? ORDER BY task_id",
+            (project_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_build_task(row) for row in rows]
+
+
+async def update_build_task(task: BuildTask) -> None:
+    await save_build_task(task)
+
+
+def _row_to_build_artifact(row: aiosqlite.Row) -> BuildArtifact:
+    return BuildArtifact.model_validate(
+        {
+            "artifact_id": row["artifact_id"],
+            "project_id": row["project_id"],
+            "task_id": row["task_id"],
+            "filename": row["filename"],
+            "content": row["content"],
+            "created_at": row["created_at"],
+        }
+    )
+
+
+async def save_build_artifact(artifact: BuildArtifact) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO build_artifacts (
+                artifact_id, project_id, task_id, filename, content, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                artifact.artifact_id,
+                artifact.project_id,
+                artifact.task_id,
+                artifact.filename,
+                artifact.content,
+                artifact.created_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_build_artifact(artifact_id: str) -> BuildArtifact | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM build_artifacts WHERE artifact_id = ?",
+            (artifact_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_build_artifact(row)
+
+
+async def list_build_artifacts(project_id: str) -> list[BuildArtifact]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM build_artifacts WHERE project_id = ? ORDER BY artifact_id",
+            (project_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_build_artifact(row) for row in rows]
+
+
+def _row_to_build_submission(row: aiosqlite.Row) -> BuildSubmission:
+    import json
+
+    return BuildSubmission.model_validate(
+        {
+            "submission_id": row["submission_id"],
+            "project_id": row["project_id"],
+            "artifact_ids": json.loads(row["artifact_ids"]),
+            "task_count": row["task_count"],
+            "created_at": row["created_at"],
+            "status": row["status"],
+        }
+    )
+
+
+async def save_build_submission(submission: BuildSubmission) -> None:
+    import json
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO build_submissions (
+                submission_id, project_id, artifact_ids, task_count, created_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                submission.submission_id,
+                submission.project_id,
+                json.dumps(submission.artifact_ids),
+                submission.task_count,
+                submission.created_at,
+                submission.status,
+            ),
+        )
+        await db.commit()
+
+
+async def get_build_submission(submission_id: str) -> BuildSubmission | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM build_submissions WHERE submission_id = ?",
+            (submission_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_build_submission(row)
+
+
+async def list_build_submissions(project_id: str) -> list[BuildSubmission]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM build_submissions WHERE project_id = ? ORDER BY created_at DESC",
+            (project_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_build_submission(row) for row in rows]

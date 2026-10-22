@@ -294,3 +294,27 @@ class MockLedgerEntry(BaseModel):
     amount: int
     paid_at: str
 
+
+class MemoryCategory(str, Enum):
+    CODING_MISTAKE = "CODING_MISTAKE"
+    CS_MISUNDERSTANDING = "CS_MISUNDERSTANDING"
+    QA_BYPASS = "QA_BYPASS"
+    FINANCE_MARGIN_LEAK = "FINANCE_MARGIN_LEAK"
+    CLIENT_CHURN_REASON = "CLIENT_CHURN_REASON"
+
+
+class MemorySeverity(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class CorporateMemory(BaseModel):
+    memory_id: str
+    project_id: str
+    category: MemoryCategory
+    lesson_text: str
+    severity: MemorySeverity
+    target_agent: str
+    created_at: str
+

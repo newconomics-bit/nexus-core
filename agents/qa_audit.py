@@ -12,6 +12,7 @@ from database import (
     save_approval,
     update_project_state,
 )
+from agents.post_mortem import run_post_mortem
 from core.telegram_bot import send_approval_card
 from models import (
     ApprovalRequest,
@@ -203,6 +204,8 @@ async def run_audit(project_id: str, submission_id: str) -> AuditReport:
             )
             await save_approval(approval)
             await send_approval_card(approval)
+
+            await run_post_mortem(project_id)
     else:
         report_status = AuditReportStatus.PASSED
         await update_project_state(project_id, "APPROVED")

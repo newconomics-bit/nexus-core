@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry
 
 DB_PATH = "rakitdigital.db"
 
@@ -50,10 +50,15 @@ async def init_db() -> None:
                 status TEXT NOT NULL,
                 requested_at TEXT NOT NULL,
                 decided_at TEXT NOT NULL DEFAULT '',
-                decided_by TEXT NOT NULL DEFAULT ''
+                decided_by TEXT NOT NULL DEFAULT '',
+                expires_at TEXT
             )
             """
         )
+        cursor = await db.execute("PRAGMA table_info(approvals)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "expires_at" not in columns:
+            await db.execute("ALTER TABLE approvals ADD COLUMN expires_at TEXT")
         await db.commit()
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -163,6 +168,33 @@ async def init_db() -> None:
                 monthly_fee INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 current_invoice_id TEXT
+            )
+            """
+        )
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qris_requests (
+                qris_id TEXT PRIMARY KEY,
+                invoice_id TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                qr_string TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mock_ledger (
+                entry_id TEXT PRIMARY KEY,
+                reference_code TEXT NOT NULL UNIQUE,
+                qris_id TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                paid_at TEXT NOT NULL
             )
             """
         )
@@ -310,6 +342,7 @@ def _row_to_approval(row: aiosqlite.Row) -> ApprovalRequest:
             "requested_at": row["requested_at"],
             "decided_at": row["decided_at"],
             "decided_by": row["decided_by"],
+            "expires_at": row["expires_at"],
         }
     )
 
@@ -321,8 +354,8 @@ async def save_approval(approval: ApprovalRequest) -> None:
             """
             INSERT INTO approvals (
                 approval_id, project_id, quote_id, type, payload, status,
-                requested_at, decided_at, decided_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                requested_at, decided_at, decided_by, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload["approval_id"],
@@ -334,6 +367,7 @@ async def save_approval(approval: ApprovalRequest) -> None:
                 payload["requested_at"],
                 payload["decided_at"],
                 payload["decided_by"],
+                payload.get("expires_at"),
             ),
         )
         await db.commit()
@@ -886,3 +920,152 @@ async def get_subscription(project_id: str) -> Subscription | None:
         if row is None:
             return None
         return _row_to_subscription(row)
+
+
+def _row_to_qris(row: aiosqlite.Row) -> QrisRequest:
+    return QrisRequest.model_validate(
+        {
+            "qris_id": row["qris_id"],
+            "invoice_id": row["invoice_id"],
+            "amount": row["amount"],
+            "qr_string": row["qr_string"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "expires_at": row["expires_at"],
+        }
+    )
+
+
+async def save_qris(qris: QrisRequest) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO qris_requests (
+                qris_id, invoice_id, amount, qr_string, status, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(qris_id) DO UPDATE SET
+                invoice_id = excluded.invoice_id,
+                amount = excluded.amount,
+                qr_string = excluded.qr_string,
+                status = excluded.status,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at
+            """,
+            (
+                qris.qris_id,
+                qris.invoice_id,
+                qris.amount,
+                qris.qr_string,
+                qris.status.value,
+                qris.created_at,
+                qris.expires_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_qris(qris_id: str) -> QrisRequest | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM qris_requests WHERE qris_id = ?",
+            (qris_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_qris(row)
+
+
+async def get_qris_by_invoice(invoice_id: str) -> QrisRequest | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM qris_requests WHERE invoice_id = ? ORDER BY created_at DESC LIMIT 1",
+            (invoice_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_qris(row)
+
+
+async def get_expired_qris() -> list[QrisRequest]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM qris_requests WHERE status = 'ACTIVE' AND expires_at < ?",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_qris(row) for row in rows]
+
+
+def _row_to_ledger(row: aiosqlite.Row) -> MockLedgerEntry:
+    return MockLedgerEntry.model_validate(
+        {
+            "entry_id": row["entry_id"],
+            "reference_code": row["reference_code"],
+            "qris_id": row["qris_id"],
+            "amount": row["amount"],
+            "paid_at": row["paid_at"],
+        }
+    )
+
+
+async def save_ledger_entry(entry: MockLedgerEntry) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO mock_ledger (
+                entry_id, reference_code, qris_id, amount, paid_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                entry.entry_id,
+                entry.reference_code,
+                entry.qris_id,
+                entry.amount,
+                entry.paid_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_ledger_by_reference(reference_code: str) -> MockLedgerEntry | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM mock_ledger WHERE reference_code = ?",
+            (reference_code,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_ledger(row)
+
+
+async def get_ledger_by_qris(qris_id: str) -> list[MockLedgerEntry]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM mock_ledger WHERE qris_id = ?",
+            (qris_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_ledger(row) for row in rows]
+
+
+async def get_expired_approvals() -> list[ApprovalRequest]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM approvals
+            WHERE status = 'PENDING' AND expires_at IS NOT NULL AND expires_at < ?
+            ORDER BY requested_at ASC
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_approval(row) for row in rows]

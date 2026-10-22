@@ -9,6 +9,7 @@ from database import (
     save_deployment,
     update_project_state,
 )
+from core.telegram_bot import send_approval_card
 from models import (
     ApprovalRequest,
     ApprovalStatus,
@@ -74,6 +75,7 @@ async def request_deployment(
         requested_at=created_at,
     )
     await save_approval(approval)
+    await send_approval_card(approval)
 
     return deployment_id, approval.approval_id
 

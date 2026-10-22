@@ -2,7 +2,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
 
 import database
@@ -13,7 +13,8 @@ from agents.finance_costing import (
     calculate_quote,
     estimate_effort,
 )
-from core.telegram_gateway import send_approval_request
+from core.telegram_bot import send_approval_card, send_access_denied_message
+from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity
 from database import (
     create_project,
     get_approval,
@@ -72,7 +73,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, dependencies=[Depends(verify_api_key)])
 
 
 @app.get("/health")
@@ -167,7 +168,7 @@ async def discount_quote(project_id: str, quote_id: str, body: DiscountRequest):
             requested_at=datetime.now(timezone.utc).isoformat(),
         )
         await save_approval(approval)
-        await send_approval_request(approval)
+        await send_approval_card(approval)
         return JSONResponse(
             status_code=202,
             content={"status": "ESCALATED", "approval_id": approval.approval_id},
@@ -271,16 +272,35 @@ async def decide_approval_endpoint(approval_id: str, body: DecideRequest) -> dic
     return await decide_approval(approval_id, body.decision, body.decided_by)
 
 
-@app.post("/api/telegram/webhook")
+@app.post("/api/telegram/webhook", dependencies=[Depends(verify_telegram_secret)])
 async def telegram_webhook(payload: dict) -> dict:
     callback = payload.get("callback_query")
     if not isinstance(callback, dict):
         raise HTTPException(status_code=400, detail="callback_query missing")
+
     data = str(callback.get("data") or "")
     if "|" not in data:
         raise HTTPException(status_code=400, detail="invalid callback data")
-    decision, approval_id = data.split("|", 1)
+
+    action, approval_id = data.split("|", 1)
+
+    if action not in ("APPROVE", "REJECT"):
+        raise HTTPException(status_code=400, detail="invalid action")
+
+    decision = "APPROVED" if action == "APPROVE" else "REJECTED"
+
     sender = callback.get("from") if isinstance(callback.get("from"), dict) else {}
+    chat_id = sender.get("id")
+
+    if chat_id is None:
+        raise HTTPException(status_code=400, detail="chat_id missing in callback")
+
+    try:
+        await verify_founder_identity(chat_id)
+    except HTTPException:
+        await send_access_denied_message(str(chat_id))
+        raise
+
     decided_by = sender.get("first_name") or "MUHAMMAD MUFTI ZAKA"
     return await decide_approval(approval_id, decision, decided_by)
 

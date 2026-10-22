@@ -9,9 +9,13 @@ from database import DB_PATH
 from main import app
 
 
+API_KEY = "dev-secret-key-change-in-production"
+
+
 @pytest.fixture
 def client():
     with TestClient(app) as http:
+        http.headers.update({"X-API-Key": API_KEY})
         yield http
 
 
@@ -324,10 +328,11 @@ def test_telegram_webhook_callback_decides_approval(client):
             "update_id": 1,
             "callback_query": {
                 "id": "cb-mock-1",
-                "data": f"APPROVED|{approval_id}",
-                "from": {"id": 1, "first_name": "MUHAMMAD MUFTI ZAKA"},
+                "data": f"APPROVE|{approval_id}",
+                "from": {"id": 123456789, "first_name": "MUHAMMAD MUFTI ZAKA"},
             },
         },
+        headers={"X-Telegram-Bot-Api-Secret-Token": "dev-webhook-secret-change-in-production"},
     )
     assert response.status_code == 200
     assert response.json()["status"] == "APPROVED"
@@ -906,4 +911,85 @@ def test_dunning_h30_churn(client):
     assert state == "CHURNED"
 
 
+TELEGRAM_WEBHOOK_SECRET = "dev-webhook-secret-change-in-production"
+FOUNDER_CHAT_ID = "123456789"
+STRANGER_CHAT_ID = "999999999"
+
+
+def test_security_api_key_required(client):
+    client.headers.pop("X-API-Key", None)
+    response = client.post("/api/project/start", json={"client_name": "Toko Maju"})
+    assert response.status_code == 401
+    assert "Unauthorized" in response.json()["detail"]
+
+
+def test_security_api_key_valid(client):
+    response = client.post("/api/project/start", json={"client_name": "Toko Maju"})
+    assert response.status_code == 200
+    assert response.json()["client_name"] == "Toko Maju"
+
+
+def test_security_telegram_webhook_secret_required(client):
+    response = client.post("/api/telegram/webhook", json={"callback_query": {"data": "APPROVE|test", "from": {"id": FOUNDER_CHAT_ID}}})
+    assert response.status_code == 401
+    assert "Unauthorized" in response.json()["detail"]
+
+
+def test_security_telegram_founder_lock_stranger(client, monkeypatch):
+    # Create an approval first
+    project_id = _approved_project(client)
+    deploy_resp = client.post(f"/api/project/{project_id}/deploy/request", json={"domain_choice": "HOSTED"})
+    approval_id = deploy_resp.json()["approval_id"]
+
+    # Verify approval is PENDING
+    pending = client.get("/api/approvals/pending").json()
+    approval = next(a for a in pending if a["approval_id"] == approval_id)
+    assert approval["status"] == "PENDING"
+
+    # Stranger tries to approve
+    headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_WEBHOOK_SECRET}
+    response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "callback_query": {
+                "data": f"APPROVE|{approval_id}",
+                "from": {"id": STRANGER_CHAT_ID, "first_name": "Hacker"},
+            }
+        },
+        headers=headers,
+    )
+    assert response.status_code == 403
+    assert "Akses Ditolak" in response.json()["detail"]
+
+    # Verify approval is still PENDING
+    pending = client.get("/api/approvals/pending").json()
+    approval = next(a for a in pending if a["approval_id"] == approval_id)
+    assert approval["status"] == "PENDING"
+
+
+def test_security_telegram_founder_lock_founder(client, monkeypatch):
+    # Create an approval first
+    project_id = _approved_project(client)
+    deploy_resp = client.post(f"/api/project/{project_id}/deploy/request", json={"domain_choice": "HOSTED"})
+    approval_id = deploy_resp.json()["approval_id"]
+
+    # Founder approves
+    headers = {"X-Telegram-Bot-Api-Secret-Token": TELEGRAM_WEBHOOK_SECRET}
+    response = client.post(
+        "/api/telegram/webhook",
+        json={
+            "callback_query": {
+                "data": f"APPROVE|{approval_id}",
+                "from": {"id": FOUNDER_CHAT_ID, "first_name": "MUHAMMAD MUFTI ZAKA"},
+            }
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "APPROVED"
+
+    # Verify approval is APPROVED
+    pending = client.get("/api/approvals/pending").json()
+    approval = next((a for a in pending if a["approval_id"] == approval_id), None)
+    assert approval is None or approval["status"] == "APPROVED"
 

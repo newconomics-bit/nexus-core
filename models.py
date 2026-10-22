@@ -10,6 +10,7 @@ class ProjectState(str, Enum):
     SIGNED = "SIGNED"
     BUILDING = "BUILDING"
     AUDITING = "AUDITING"
+    APPROVED = "APPROVED"
     DEPLOYED = "DEPLOYED"
     SUBSCRIPTION = "SUBSCRIPTION"
     CHURNED = "CHURNED"
@@ -22,6 +23,7 @@ _LINEAR = (
     ProjectState.SIGNED,
     ProjectState.BUILDING,
     ProjectState.AUDITING,
+    ProjectState.APPROVED,
     ProjectState.DEPLOYED,
     ProjectState.SUBSCRIPTION,
 )
@@ -104,6 +106,7 @@ class ApprovalType(str, Enum):
     DEPLOY = "DEPLOY"
     PAYMENT = "PAYMENT"
     QA_ESCALATION = "QA_ESCALATION"
+    DEPLOY_PRODUCTION = "DEPLOY_PRODUCTION"
 
 
 class ApprovalStatus(str, Enum):
@@ -207,5 +210,26 @@ class AuditReport(BaseModel):
     cycle: int
     findings: list[AuditFinding]
     status: AuditReportStatus
+    created_at: str
+
+
+class DomainChoice(str, Enum):
+    HOSTED = "HOSTED"
+    CUSTOM = "CUSTOM"
+
+
+class DeploymentStatus(str, Enum):
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    DEPLOYED = "DEPLOYED"
+    REJECTED = "REJECTED"
+
+
+class DeploymentRequest(BaseModel):
+    deployment_id: str
+    project_id: str
+    domain_choice: DomainChoice
+    custom_domain_url: str | None = None
+    hosted_url: str | None = None
+    status: DeploymentStatus = DeploymentStatus.PENDING_APPROVAL
     created_at: str
 

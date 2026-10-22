@@ -14,6 +14,8 @@ from agents.finance_costing import (
     estimate_effort,
 )
 from agents.payment_verification import generate_qris, handle_qris_webhook, VerificationResult
+from agents.post_mortem import run_post_mortem
+from core.prompt_injector import inject_memory
 from core.telegram_bot import send_approval_card, send_access_denied_message
 from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity
 from core.scheduler import run_scheduler_tick
@@ -612,4 +614,29 @@ async def qris_webhook(payload: dict) -> dict:
 @app.post("/api/scheduler/tick")
 async def scheduler_tick() -> dict:
     return await run_scheduler_tick()
+
+
+@app.post("/api/project/{project_id}/post-mortem")
+async def post_mortem_endpoint(project_id: str) -> dict:
+    project = await get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    memories = await run_post_mortem(project_id)
+    return {
+        "project_id": project_id,
+        "memories_created": len(memories),
+        "memories": [m.model_dump() for m in memories],
+    }
+
+
+@app.get("/api/memory/inject")
+async def memory_inject_endpoint(agent: str) -> dict:
+    base_prompt = f"Kamu adalah {agent}"
+    injected = await inject_memory(base_prompt, agent.upper())
+    return {
+        "agent": agent.upper(),
+        "base_prompt": base_prompt,
+        "injected_prompt": injected,
+    }
 

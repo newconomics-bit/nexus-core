@@ -12,6 +12,7 @@ from database import (
     save_subscription,
     update_project_state,
 )
+from agents.post_mortem import run_post_mortem
 from models import Invoice, InvoiceStatus, ProjectState, Subscription, SubscriptionStatus
 
 
@@ -53,6 +54,8 @@ async def activate_subscription(project_id: str, monthly_fee: int = DEFAULT_MONT
     await save_invoice(invoice)
 
     await update_project_state(project_id, ProjectState.SUBSCRIPTION.value)
+
+    await run_post_mortem(project_id)
 
     return subscription
 
@@ -115,6 +118,8 @@ async def run_dunning_sop() -> list[dict]:
                 "action": "CHURNED",
                 "message": "Om Tono: Hapus server & DB",
             })
+
+            await run_post_mortem(invoice.project_id)
         elif days_overdue >= 14 and project["state"] == ProjectState.SUBSCRIPTION.value:
             actions.append({
                 "invoice_id": invoice.invoice_id,

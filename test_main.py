@@ -1221,3 +1221,181 @@ def test_qris_expires_after_24_hours(client):
     # Should generate new QRIS since old one expired
     assert qris_check.json()["qris_id"] != qris_id
 
+
+def _project_with_payment_exception(client) -> tuple[str, str]:
+    """Create a project with PAYMENT_EXCEPTION invoice."""
+    project_id, invoice_id = _project_with_invoice(client)
+    qris_resp = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    qris_id = qris_resp.json()["qris_id"]
+    # Pay wrong amount to trigger PAYMENT_EXCEPTION
+    client.post("/api/mock/qris/simulate_scan", json={"qris_id": qris_id, "paid_amount": 150001})
+    return project_id, invoice_id
+
+
+def test_post_mortem_success_no_coding_mistake(client):
+    """Test post-mortem on successful project (1 audit cycle, SUBSCRIPTION) -> no CODING_MISTAKE."""
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    resp = client.post(f"/api/project/{project_id}/post-mortem")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["memories_created"] == 0
+    assert body["memories"] == []
+
+
+def test_post_mortem_rework_creates_coding_mistake(client, monkeypatch):
+    """Test post-mortem on project with 3 audit cycles -> CODING_MISTAKE memory created."""
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def dirty_backend(*args, **kwargs):
+        from models import BuildArtifact, TaskStatus
+        import uuid
+        from datetime import datetime, timezone
+        task = args[0]
+        spec = args[1]
+        artifact = BuildArtifact(
+            artifact_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename="backend_feature.py",
+            content="password = 'admin123'\napi_key = 'secret123'\nprint('hello')",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        from database import save_build_artifact
+        await save_build_artifact(artifact)
+        task.status = TaskStatus.DONE
+        task.artifact_id = artifact.artifact_id
+        from database import save_build_task
+        await save_build_task(task)
+        return artifact
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "execute_task", dirty_backend)
+
+    for cycle in range(1, 4):
+        client.post(f"/api/project/{project_id}/build/run")
+        client.post(f"/api/project/{project_id}/audit/run")
+
+    assert _project_state(project_id) == "BLOCKED"
+
+    resp = client.post(f"/api/project/{project_id}/post-mortem")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["memories_created"] == 1
+    assert len(body["memories"]) == 1
+    mem = body["memories"][0]
+    assert mem["category"] == "CODING_MISTAKE"
+    assert mem["target_agent"] == "CODER"
+    assert mem["severity"] == "HIGH"
+    assert "rework di QA" in mem["lesson_text"]
+
+
+def test_post_mortem_payment_exception_creates_cs_misunderstanding(client):
+    """Test post-mortem on project with PAYMENT_EXCEPTION -> CS_MISUNDERSTANDING memory created."""
+    project_id, invoice_id = _project_with_payment_exception(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    resp = client.post(f"/api/project/{project_id}/post-mortem")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["memories_created"] == 1
+    assert len(body["memories"]) == 1
+    mem = body["memories"][0]
+    assert mem["category"] == "CS_MISUNDERSTANDING"
+    assert mem["target_agent"] == "CS"
+    assert mem["severity"] == "MEDIUM"
+    assert "salah nominal" in mem["lesson_text"]
+
+
+def test_post_mortem_churned_creates_client_churn_reason(client):
+    """Test post-mortem on CHURNED project -> CLIENT_CHURN_REASON memory created."""
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM subscriptions")
+        conn.commit()
+    finally:
+        conn.close()
+
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE invoices SET due_date = ? WHERE project_id = ? AND status = 'PENDING'",
+            ((datetime.now(timezone.utc) - timedelta(days=31)).isoformat(), project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    client.post("/api/billing/dunning/run")
+    assert _project_state(project_id) == "CHURNED"
+
+    resp = client.post(f"/api/project/{project_id}/post-mortem")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["memories_created"] == 1
+    assert len(body["memories"]) == 1
+    mem = body["memories"][0]
+    assert mem["category"] == "CLIENT_CHURN_REASON"
+    assert mem["target_agent"] == "MANAGER"
+    assert mem["severity"] == "HIGH"
+    assert "gagal/churn" in mem["lesson_text"]
+
+
+def test_prompt_injector_injects_memory(client, monkeypatch):
+    """Test prompt injector adds corporate memory to base prompt."""
+    # First create some memories
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def dirty_backend(*args, **kwargs):
+        from models import BuildArtifact, TaskStatus
+        import uuid
+        from datetime import datetime, timezone
+        task = args[0]
+        spec = args[1]
+        artifact = BuildArtifact(
+            artifact_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename="backend_feature.py",
+            content="password = 'admin123'\napi_key = 'secret123'\nprint('hello')",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        from database import save_build_artifact
+        await save_build_artifact(artifact)
+        task.status = TaskStatus.DONE
+        task.artifact_id = artifact.artifact_id
+        from database import save_build_task
+        await save_build_task(task)
+        return artifact
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "execute_task", dirty_backend)
+
+    for _ in range(3):
+        client.post(f"/api/project/{project_id}/build/run")
+        client.post(f"/api/project/{project_id}/audit/run")
+
+    assert _project_state(project_id) == "BLOCKED"
+
+    # Run post-mortem to create memory
+    client.post(f"/api/project/{project_id}/post-mortem")
+
+    # Test injection
+    resp = client.get("/api/memory/inject?agent=CODER")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["agent"] == "CODER"
+    assert body["base_prompt"] == "Kamu adalah CODER"
+    assert "CORPORATE MEMORY (LESSONS LEARNED)" in body["injected_prompt"]
+    assert "CODING_MISTAKE" in body["injected_prompt"]
+    assert "rework di QA" in body["injected_prompt"]
+

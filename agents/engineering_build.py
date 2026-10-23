@@ -12,6 +12,7 @@ from database import (
     save_build_task,
     update_project_state,
 )
+from agents.visual_quality_gate import audit_frontend
 from models import BuildArtifact, BuildSubmission, BuildTask, ProjectSpec, TaskKind, TaskStatus
 
 
@@ -70,6 +71,15 @@ INSERT INTO {task.title.lower().replace(' ', '_')} (name) VALUES ('sample');
 """
 
 
+async def _apply_visual_quality_gate(task: BuildTask, content: str) -> tuple[bool, list[dict]]:
+    """Apply visual quality gate for FRONTEND artifacts. Returns (passed, findings)."""
+    if task.kind != TaskKind.FRONTEND:
+        return True, []
+    
+    result = audit_frontend(content)
+    return result["passed"], result["findings"]
+
+
 async def execute_task(task: BuildTask, spec: ProjectSpec) -> BuildArtifact:
     artifact_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
@@ -109,6 +119,42 @@ async def execute_task(task: BuildTask, spec: ProjectSpec) -> BuildArtifact:
         if not content or "MOCK MODE ACTIVE" in content:
             content = _mock_database(task, spec)
         filename = f"{task.title.lower().replace(' ', '_')}.sql"
+    
+    # Apply visual quality gate for FRONTEND
+    passed, findings = await _apply_visual_quality_gate(task, content)
+    if not passed:
+        # Mark task as FAILED so it triggers rework
+        task.status = TaskStatus.FAILED
+        await save_build_task(task)
+        
+        # Create rework task with findings
+        rework_task = BuildTask(
+            task_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            kind=TaskKind.FRONTEND,
+            title=f"Rework: Visual Quality Gate - {task.title}",
+            status=TaskStatus.PENDING,
+        )
+        await save_build_task(rework_task)
+        
+        # Return artifact with findings in content for traceability
+        content = f"// VISUAL QUALITY GATE FAILED\n// Findings: {findings}\n\n{content}"
+        
+        artifact = BuildArtifact(
+            artifact_id=artifact_id,
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename=filename,
+            content=content,
+            created_at=created_at,
+        )
+        
+        await save_build_artifact(artifact)
+        
+        # Task remains FAILED - do NOT mark as DONE
+        await save_build_task(task)
+        
+        return artifact
     
     artifact = BuildArtifact(
         artifact_id=artifact_id,

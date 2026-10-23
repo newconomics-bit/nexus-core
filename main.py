@@ -6,6 +6,8 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
 
 import database
+from agents.text_quality_gate import score_text
+from agents.visual_quality_gate import audit_frontend
 from agents.cs_intake import run_discovery
 from agents.finance_costing import (
     DiscountHardCap,
@@ -639,4 +641,28 @@ async def memory_inject_endpoint(agent: str) -> dict:
         "base_prompt": base_prompt,
         "injected_prompt": injected,
     }
+
+
+@app.get("/api/quality/text")
+async def text_quality_endpoint(text: str) -> dict:
+    return score_text(text)
+
+
+@app.get("/api/quality/visual")
+async def visual_quality_endpoint(artifact_id: str) -> dict:
+    from database import get_build_artifact
+    artifact = await get_build_artifact(artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return audit_frontend(artifact.content)
+
+
+@app.get("/api/prompts/{agent_name}")
+async def get_prompt(agent_name: str) -> dict:
+    from pathlib import Path
+    prompt_path = Path(__file__).resolve().parent / "prompts" / f"{agent_name.lower()}.md"
+    if not prompt_path.exists():
+        raise HTTPException(status_code=404, detail=f"Prompt for agent '{agent_name}' not found")
+    content = prompt_path.read_text(encoding="utf-8")
+    return {"agent": agent_name, "content": content}
 

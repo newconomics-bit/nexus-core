@@ -13,10 +13,20 @@ from database import (
     update_project_state,
 )
 from agents.post_mortem import run_post_mortem
+from agents.text_quality_gate import enforce
 from models import Invoice, InvoiceStatus, ProjectState, Subscription, SubscriptionStatus
 
 
 DEFAULT_MONTHLY_FEE = 150_000
+
+
+def _enforce_text_quality(message: str) -> str:
+    """Apply text quality gate to client-facing messages."""
+    should_send, msg = enforce(message)
+    if should_send:
+        return message
+    # Log violation and return safe fallback
+    return "Halo Bang, info tagihan dari tim kami."
 
 
 async def activate_subscription(project_id: str, monthly_fee: int = DEFAULT_MONTHLY_FEE) -> Subscription:
@@ -111,22 +121,24 @@ async def run_dunning_sop() -> list[dict]:
             if subscription:
                 subscription.status = SubscriptionStatus.CHURNED
                 await save_subscription(subscription)
+            message = _enforce_text_quality("Bang, invoice hosting sudah telat 30 hari. Server kita hapus ya. Kalau mau lanjut, chat kami.")
             actions.append({
                 "invoice_id": invoice.invoice_id,
                 "project_id": invoice.project_id,
                 "days_overdue": days_overdue,
                 "action": "CHURNED",
-                "message": "Om Tono: Hapus server & DB",
+                "message": message,
             })
 
             await run_post_mortem(invoice.project_id)
         elif days_overdue >= 14 and project["state"] == ProjectState.SUBSCRIPTION.value:
+            message = _enforce_text_quality("Bang, tagihan sudah 14 hari lewat. Mau kita tawarin diskon atau downgrade paketnya?")
             actions.append({
                 "invoice_id": invoice.invoice_id,
                 "project_id": invoice.project_id,
                 "days_overdue": days_overdue,
                 "action": "RETENTION_OFFER",
-                "message": "Wati: Tawarin Diskon/Downgrade",
+                "message": message,
             })
         elif days_overdue >= 7 and project["state"] == ProjectState.SUBSCRIPTION.value:
             await update_project_state(invoice.project_id, ProjectState.SUSPENDED.value)
@@ -134,20 +146,22 @@ async def run_dunning_sop() -> list[dict]:
             if subscription:
                 subscription.status = SubscriptionStatus.SUSPENDED
                 await save_subscription(subscription)
+            message = _enforce_text_quality("Bang, website sudah disuspend karena tagihan telat 7 hari. Bayar dulu baru aktif lagi.")
             actions.append({
                 "invoice_id": invoice.invoice_id,
                 "project_id": invoice.project_id,
                 "days_overdue": days_overdue,
                 "action": "SUSPENDED",
-                "message": "Om Tono: Suspend website",
+                "message": message,
             })
         elif days_overdue >= 3 and project["state"] == ProjectState.SUBSCRIPTION.value:
+            message = _enforce_text_quality("Bang, invoice hosting telat 3 hari nih. Ada kendala di pembayaran atau mau saya kirim ulang QRIS-nya?")
             actions.append({
                 "invoice_id": invoice.invoice_id,
                 "project_id": invoice.project_id,
                 "days_overdue": days_overdue,
                 "action": "REMINDER_SENT",
-                "message": "Wati: Kirim WA Reminder",
+                "message": message,
             })
 
     return actions

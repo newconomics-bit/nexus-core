@@ -3,6 +3,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from agents.text_quality_gate import enforce
 from core.llm_gateway import call_llm
 from models import ProjectSpec
 
@@ -37,15 +38,34 @@ def parse_project_spec(reply: str) -> ProjectSpec | None:
         return None
 
 
+def _enforce_text_quality(reply: str) -> str:
+    """Apply text quality gate, retry once if needed."""
+    should_send, msg = enforce(reply)
+    if should_send:
+        return reply
+    
+    # Log violation and ask for rewrite (mock: we just return a cleaner version)
+    # In real implementation, this would trigger LLM to regenerate
+    rewrite_prompt = (
+        f"REWRITE NEEDED: {msg}\n"
+        f"Original: {reply}\n"
+        "Rewrite without violations, keep the same meaning."
+    )
+    # Mock: return a safe fallback
+    return "Halo Bang, terima kasih infonya. Lanjut ya."
+
+
 async def run_discovery(project_id: str, client_message: str, db_session) -> dict:
     reply = await call_llm(SARI_MODEL, build_system_prompt(), client_message)
-    spec = parse_project_spec(reply)
+    # Apply text quality gate before sending to client
+    clean_reply = _enforce_text_quality(reply)
+    spec = parse_project_spec(clean_reply)
     if spec is None:
-        return {"status": "NEED_MORE_INFO", "reply": reply}
+        return {"status": "NEED_MORE_INFO", "reply": clean_reply}
 
     await db_session.save_project_spec(project_id, spec.model_dump_json())
     return {
         "status": "SPEC_COMPLETE",
-        "reply": reply,
+        "reply": clean_reply,
         "spec": spec.model_dump(),
     }

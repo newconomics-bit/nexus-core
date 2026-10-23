@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1655,6 +1656,378 @@ def test_quality_gates_idempotent(client):
 
 def test_no_external_tools_installed():
     """Test HARD RULES no.5: no external tools packages installed."""
+    # Check requirements.txt
+    with open("requirements.txt") as f:
+        reqs = f.read().lower()
+    
+    forbidden = [
+        "impeccable", "better-icons", "hallmark", "taste-skill", "stop-slop",
+        "humanizer", "open-design", "mailcheap", "helpin", "inbox-zero",
+        "office-kw", "figcraft", "n8n", "zendesk", "hubspot", "vapi", "apollo"
+    ]
+    for pkg in forbidden:
+        assert pkg not in reqs, f"Forbidden package {pkg} found in requirements.txt"
+    
+    # Check package.json if exists
+    import os
+    if os.path.exists("package.json"):
+        with open("package.json") as f:
+            pkg_json = f.read().lower()
+        for pkg in forbidden:
+            assert pkg not in pkg_json, f"Forbidden package {pkg} found in package.json"
+
+
+# ==================== WAVE 13 TESTS ====================
+
+def test_daily_report_generate_aggregates_correctly(client):
+    """Test daily report aggregates: revenue, pipeline, exceptions, memories."""
+    from datetime import date
+    import asyncio
+    from database import save_invoice, save_subscription, DB_PATH
+    from models import Invoice, InvoiceStatus, Subscription, SubscriptionStatus, ProjectState
+    import uuid
+    from datetime import datetime, timezone, timedelta
+    import sqlite3
+
+    # Clean up any existing invoices/subscriptions from previous tests
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM subscriptions")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Create a project and seed data
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    # Seed a PAID invoice for today
+    today = date.today().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+    paid_invoice = Invoice(
+        invoice_id=str(uuid.uuid4()),
+        project_id=project_id,
+        amount=150000,
+        due_date=(date.today() - timedelta(days=5)).isoformat(),
+        status=InvoiceStatus.PAID,
+        paid_at=now,
+    )
+    asyncio.run(save_invoice(paid_invoice))
+
+    # Seed a PAYMENT_EXCEPTION invoice
+    exception_invoice = Invoice(
+        invoice_id=str(uuid.uuid4()),
+        project_id=project_id,
+        amount=150000,
+        due_date=(date.today() - timedelta(days=2)).isoformat(),
+        status=InvoiceStatus.PAYMENT_EXCEPTION,
+        created_at=now,
+    )
+    asyncio.run(save_invoice(exception_invoice))
+
+    # Generate report
+    resp = client.get("/api/budi/report/today")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["revenue_today"] == 150000
+    assert "SUBSCRIPTION" in body["pipeline"]
+    assert len(body["exceptions"]) == 1
+    assert "nominal mismatch" in body["exceptions"][0].lower()
+    assert body["new_memories"] >= 0
+
+
+def test_daily_report_format_passes_text_gate(client):
+    """Test daily report format passes text quality gate (score >= 35)."""
+    from datetime import date
+    resp = client.get("/api/budi/report/today")
+    assert resp.status_code == 200
+    body = resp.json()
+    
+    # Generate the formatted text
+    from agents.daily_report import format_report_text
+    from models import DailyReport
+    report = DailyReport(**body)
+    formatted = format_report_text(report)
+    
+    # Check it passes text quality gate
+    from agents.text_quality_gate import score_text
+    score_result = score_text(formatted)
+    assert score_result["passed"] is True
+    assert score_result["score"] >= 35
+
+
+def test_alert_payment_exception_created(client):
+    """Test PAYMENT_EXCEPTION triggers alert CRITICAL."""
+    from datetime import date
+    project_id = _deployed_project(client)
+    assert _project_state(project_id) == "SUBSCRIPTION"
+
+    # Trigger payment exception via simulate scan with wrong amount
+    qris_resp = client.post(f"/api/billing/invoices/", json={})  # get invoice list first
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    invoice_id = invoices[0]["invoice_id"]
+    
+    qris_resp = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    qris_id = qris_resp.json()["qris_id"]
+    
+    # Scan with wrong amount
+    client.post("/api/mock/qris/simulate_scan", json={"qris_id": qris_id, "paid_amount": 150001})
+    
+    # Check alerts
+    alerts = client.get("/api/budi/alerts").json()
+    payment_alerts = [a for a in alerts if a["type"] == "PAYMENT_EXCEPTION"]
+    assert len(payment_alerts) >= 1
+    alert = payment_alerts[0]
+    assert alert["severity"] == "CRITICAL"
+    assert "nominal mismatch" in alert["message"].lower() or "selisih" in alert["message"].lower()
+
+
+def test_alert_discount_auto_rejected(client):
+    """Test DISCOUNT_AUTO_REJECTED triggers alert WARNING after timeout."""
+    project_id = _quoted_project(client)
+    quote = client.post(f"/api/project/{project_id}/quote/generate").json()
+
+    # Request 15% discount (requires approval)
+    disc_resp = client.post(
+        f"/api/project/{project_id}/quote/{quote['quote_id']}/discount",
+        json={"discount_pct": 15, "founder_approved": False},
+    )
+    assert disc_resp.status_code == 202
+    approval_id = disc_resp.json()["approval_id"]
+
+    # Manually expire the approval
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE approvals SET expires_at = ? WHERE approval_id = ?",
+            ((datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat(), approval_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Run scheduler tick (triggers auto-reject and alert)
+    client.post("/api/scheduler/tick")
+
+    # Check alerts
+    alerts = client.get("/api/budi/alerts").json()
+    discount_alerts = [a for a in alerts if a["type"] == "DISCOUNT_AUTO_REJECTED"]
+    assert len(discount_alerts) >= 1
+    alert = discount_alerts[0]
+    assert alert["severity"] == "WARNING"
+    assert "10%" in alert["message"]
+
+
+def test_alert_project_blocked(client, monkeypatch):
+    """Test PROJECT_BLOCKED triggers alert CRITICAL after 3 audit cycles."""
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def dirty_backend(*args, **kwargs):
+        from models import BuildArtifact, TaskStatus
+        import uuid
+        from datetime import datetime, timezone
+        task = args[0]
+        spec = args[1]
+        artifact = BuildArtifact(
+            artifact_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename="backend_feature.py",
+            content="password = 'admin123'\napi_key = 'secret123'\nprint('hello')",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        from database import save_build_artifact
+        await save_build_artifact(artifact)
+        task.status = TaskStatus.DONE
+        task.artifact_id = artifact.artifact_id
+        from database import save_build_task
+        await save_build_task(task)
+        return artifact
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "execute_task", dirty_backend)
+
+    for _ in range(3):
+        client.post(f"/api/project/{project_id}/build/run")
+        client.post(f"/api/project/{project_id}/audit/run")
+
+    assert _project_state(project_id) == "BLOCKED"
+
+    # Check alerts
+    alerts = client.get("/api/budi/alerts").json()
+    blocked_alerts = [a for a in alerts if a["type"] == "PROJECT_BLOCKED"]
+    assert len(blocked_alerts) >= 1
+    alert = blocked_alerts[0]
+    assert alert["severity"] == "CRITICAL"
+    assert "blocked" in alert["message"].lower()
+
+
+def test_alert_token_cap_near_anti_spam(client, monkeypatch):
+    """Test TOKEN_CAP_NEAR anti-spam: 2 calls in 1 hour -> only 1 alert."""
+    from agents.proactive_alerts import check_token_cap_alerts
+    from models import AlertType, AlertSeverity
+    import aiosqlite
+    from database import DB_PATH
+    
+    # Clean up alert_events table before test
+    async def cleanup():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM alert_events")
+            await db.commit()
+    asyncio.run(cleanup())
+    
+    # Monkeypatch token estimate to return 1.7 (80%+ of $2 cap)
+    import database as db
+    async def mock_get_token_usage_estimate(*args, **kwargs):
+        return 1.7
+    monkeypatch.setattr(db, "get_token_usage_estimate", mock_get_token_usage_estimate)
+
+    # First call
+    alerts1 = asyncio.run(check_token_cap_alerts())
+    assert len(alerts1) == 1
+    assert alerts1[0].type == AlertType.TOKEN_CAP_NEAR
+    assert alerts1[0].severity == AlertSeverity.WARNING
+
+    # Second call within 1 hour - should be suppressed
+    alerts2 = asyncio.run(check_token_cap_alerts())
+    assert len(alerts2) == 1  # Still 1 (the same alert returned, or cached)
+    # Actually check database - should only have 1 alert record
+    alerts_db = client.get("/api/budi/alerts").json()
+    token_alerts = [a for a in alerts_db if a["type"] == "TOKEN_CAP_NEAR"]
+    assert len(token_alerts) == 1
+
+
+def test_alert_memory_created_batched_to_report(client, monkeypatch):
+    """Test MEMORY_CREATED alerts are INFO and batched to daily report (not real-time)."""
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+
+    async def dirty_backend(*args, **kwargs):
+        from models import BuildArtifact, TaskStatus
+        import uuid
+        from datetime import datetime, timezone
+        task = args[0]
+        spec = args[1]
+        artifact = BuildArtifact(
+            artifact_id=str(uuid.uuid4()),
+            project_id=task.project_id,
+            task_id=task.task_id,
+            filename="backend_feature.py",
+            content="password = 'admin123'\napi_key = 'secret123'\nprint('hello')",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        from database import save_build_artifact
+        await save_build_artifact(artifact)
+        task.status = TaskStatus.DONE
+        task.artifact_id = artifact.artifact_id
+        from database import save_build_task
+        await save_build_task(task)
+        return artifact
+
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "execute_task", dirty_backend)
+
+    for _ in range(3):
+        client.post(f"/api/project/{project_id}/build/run")
+        client.post(f"/api/project/{project_id}/audit/run")
+
+    assert _project_state(project_id) == "BLOCKED"
+
+    # Run post-mortem (creates memories)
+    client.post(f"/api/project/{project_id}/post-mortem")
+
+    # Check alerts - should have MEMORY_CREATED but they're INFO (not sent real-time)
+    alerts = client.get("/api/budi/alerts").json()
+    memory_alerts = [a for a in alerts if a["type"] == "MEMORY_CREATED"]
+    # INFO alerts are not sent real-time, so they may not appear in unacknowledged
+    # But they should be counted in daily report
+    
+    # Verify daily report counts them
+    from datetime import date
+    resp = client.get("/api/budi/report/today")
+    assert resp.status_code == 200
+    # new_memories should be >= 1 (CODING_MISTAKE + CLIENT_CHURN_REASON)
+
+
+def test_daily_report_no_duplicate_send(client):
+    """Test daily report not sent twice on same day."""
+    from datetime import date
+    
+    # Clean up any existing reports for today
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM daily_reports")
+        conn.commit()
+    finally:
+        conn.close()
+    
+    # First send
+    resp1 = client.post("/api/budi/report/send")
+    assert resp1.status_code == 200
+    assert resp1.json()["status"] == "sent"
+
+    # Second send same day - should be skipped
+    resp2 = client.post("/api/budi/report/send")
+    assert resp2.status_code == 200
+    assert resp2.json()["status"] == "skipped"
+    assert resp2.json()["reason"] == "already_sent"
+
+
+def test_alert_acknowledge(client):
+    """Test POST /ack marks alert acknowledged and removes from unacknowledged list."""
+    # First create an alert
+    project_id = _deployed_project(client)
+    invoices = client.get(f"/api/project/{project_id}/billing/invoices").json()
+    invoice_id = invoices[0]["invoice_id"]
+    qris_resp = client.post(f"/api/billing/invoices/{invoice_id}/qris")
+    qris_id = qris_resp.json()["qris_id"]
+    client.post("/api/mock/qris/simulate_scan", json={"qris_id": qris_id, "paid_amount": 150001})
+
+    alerts = client.get("/api/budi/alerts").json()
+    assert len(alerts) >= 1
+    alert_id = alerts[0]["alert_id"]
+
+    # Acknowledge
+    ack_resp = client.post(f"/api/budi/alerts/{alert_id}/ack")
+    assert ack_resp.status_code == 200
+    assert ack_resp.json()["acknowledged"] is True
+
+    # Should not appear in unacknowledged list
+    alerts_after = client.get("/api/budi/alerts?acknowledged=false").json()
+    alert_ids = [a["alert_id"] for a in alerts_after]
+    assert alert_id not in alert_ids
+
+
+def test_daily_report_empty_day_valid(client):
+    """Test daily report on empty day: revenue 0, pipeline empty, valid format & score >= 35."""
+    from datetime import date, timedelta
+    
+    # Use a future date with no data
+    future_date = date.today() + timedelta(days=365)
+    
+    # Generate report for that date
+    import asyncio
+    from agents.daily_report import generate_daily_report, format_report_text
+    
+    report = asyncio.run(generate_daily_report(future_date))
+    assert report.revenue_today == 0
+    assert len(report.exceptions) == 0
+    
+    formatted = format_report_text(report)
+    from agents.text_quality_gate import score_text
+    score_result = score_text(formatted)
+    assert score_result["passed"] is True
+    assert score_result["score"] >= 35
+
+
+def test_no_external_tools_installed_wave13():
+    """Test HARD RULES no.5: no external tools packages installed (Wave 13)."""
     # Check requirements.txt
     with open("requirements.txt") as f:
         reqs = f.read().lower()

@@ -261,6 +261,7 @@ class Invoice(BaseModel):
     due_date: str
     status: InvoiceStatus = InvoiceStatus.PENDING
     paid_at: str | None = None
+    created_at: str | None = None
 
 
 class Subscription(BaseModel):
@@ -317,4 +318,46 @@ class CorporateMemory(BaseModel):
     severity: MemorySeverity
     target_agent: str
     created_at: str
+
+
+class AlertType(str, Enum):
+    PAYMENT_EXCEPTION = "PAYMENT_EXCEPTION"
+    DISCOUNT_AUTO_REJECTED = "DISCOUNT_AUTO_REJECTED"
+    PROJECT_BLOCKED = "PROJECT_BLOCKED"
+    TOKEN_CAP_NEAR = "TOKEN_CAP_NEAR"
+    MEMORY_CREATED = "MEMORY_CREATED"
+    DEPLOY_READY = "DEPLOY_READY"
+
+
+class AlertSeverity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+class AlertSentVia(str, Enum):
+    TELEGRAM = "TELEGRAM"
+    LOG = "LOG"
+
+
+class AlertEvent(BaseModel):
+    alert_id: str
+    project_id: str | None = None
+    type: AlertType
+    severity: AlertSeverity
+    message: str
+    sent_via: AlertSentVia = AlertSentVia.LOG
+    created_at: str
+    acknowledged: bool = False
+
+
+class DailyReport(BaseModel):
+    report_id: str
+    report_date: str
+    revenue_today: int
+    pipeline: dict[str, int]
+    exceptions: list[str]
+    new_memories: int
+    alerts_sent_today: int
+    generated_at: str
 

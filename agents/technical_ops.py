@@ -9,6 +9,7 @@ from database import (
     save_deployment,
     update_project_state,
 )
+from agents.proactive_alerts import alert_deploy_ready
 from core.telegram_bot import send_approval_card
 from models import (
     ApprovalRequest,
@@ -76,6 +77,12 @@ async def request_deployment(
     )
     await save_approval(approval)
     await send_approval_card(approval)
+
+    # Raise alert for deploy ready (INFO, batched to daily report)
+    await alert_deploy_ready(
+        project_id=project_id,
+        domain_choice=domain_choice.value,
+    )
 
     return deployment_id, approval.approval_id
 

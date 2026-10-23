@@ -1,11 +1,35 @@
 import os
 import json
 import httpx
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from models import ApprovalRequest
 
 load_dotenv()
+
+
+async def send_message(text: str, chat_id: str | None = None) -> str:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if chat_id is None:
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        print("TELEGRAM MOCK MODE ACTIVE")
+        print(f"MOCK MESSAGE: {text}")
+        return f"mock_{datetime.now(timezone.utc).timestamp()}"
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            )
+            response.raise_for_status()
+            return str(response.json()["result"]["message_id"])
+    except Exception as e:
+        print(f"TELEGRAM ERROR sending message: {e}")
+        raise
 
 
 async def send_approval_card(approval: ApprovalRequest) -> str:

@@ -7,6 +7,7 @@ from database import (
     list_invoices,
     save_corporate_memory,
 )
+from agents.proactive_alerts import alert_memory_created
 from models import CorporateMemory, MemoryCategory, MemorySeverity
 
 
@@ -65,5 +66,15 @@ async def run_post_mortem(project_id: str) -> list[CorporateMemory]:
 
     for memory in memories_to_save:
         await save_corporate_memory(memory)
+
+    # Raise alert for memory created (INFO level, batched to daily report)
+    if memories_to_save:
+        categories = {m.category.value for m in memories_to_save}
+        for cat in categories:
+            await alert_memory_created(
+                project_id=project_id,
+                category=cat,
+                count=sum(1 for m in memories_to_save if m.category.value == cat),
+            )
 
     return memories_to_save

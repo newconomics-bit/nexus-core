@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport
 
 DB_PATH = "rakitdigital.db"
 
@@ -156,10 +156,15 @@ async def init_db() -> None:
                 amount INTEGER NOT NULL,
                 due_date TEXT NOT NULL,
                 status TEXT NOT NULL,
-                paid_at TEXT
+                paid_at TEXT,
+                created_at TEXT
             )
             """
         )
+        cursor = await db.execute("PRAGMA table_info(invoices)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "created_at" not in columns:
+            await db.execute("ALTER TABLE invoices ADD COLUMN created_at TEXT")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -211,6 +216,37 @@ async def init_db() -> None:
                 severity TEXT NOT NULL,
                 target_agent TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alert_events (
+                alert_id TEXT PRIMARY KEY,
+                project_id TEXT,
+                type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                message TEXT NOT NULL,
+                sent_via TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                acknowledged INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_reports (
+                report_id TEXT PRIMARY KEY,
+                report_date TEXT NOT NULL,
+                revenue_today INTEGER NOT NULL,
+                pipeline TEXT NOT NULL,
+                exceptions TEXT NOT NULL,
+                new_memories INTEGER NOT NULL,
+                alerts_sent_today INTEGER NOT NULL,
+                generated_at TEXT NOT NULL
             )
             """
         )
@@ -833,14 +869,15 @@ async def save_invoice(invoice: Invoice) -> None:
         await db.execute(
             """
             INSERT INTO invoices (
-                invoice_id, project_id, amount, due_date, status, paid_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                invoice_id, project_id, amount, due_date, status, paid_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(invoice_id) DO UPDATE SET
                 project_id = excluded.project_id,
                 amount = excluded.amount,
                 due_date = excluded.due_date,
                 status = excluded.status,
-                paid_at = excluded.paid_at
+                paid_at = excluded.paid_at,
+                created_at = excluded.created_at
             """,
             (
                 invoice.invoice_id,
@@ -849,6 +886,7 @@ async def save_invoice(invoice: Invoice) -> None:
                 invoice.due_date,
                 invoice.status.value,
                 invoice.paid_at,
+                invoice.created_at,
             ),
         )
         await db.commit()
@@ -873,6 +911,16 @@ async def list_invoices(project_id: str) -> list[Invoice]:
         cursor = await db.execute(
             "SELECT * FROM invoices WHERE project_id = ? ORDER BY due_date ASC",
             (project_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_invoice(row) for row in rows]
+
+
+async def list_all_invoices() -> list[Invoice]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM invoices ORDER BY due_date ASC",
         )
         rows = await cursor.fetchall()
         return [_row_to_invoice(row) for row in rows]
@@ -1142,3 +1190,217 @@ async def get_memories_by_project(project_id: str) -> list[CorporateMemory]:
         )
         rows = await cursor.fetchall()
         return [_row_to_corporate_memory(row) for row in rows]
+
+
+def _row_to_alert_event(row: aiosqlite.Row) -> AlertEvent:
+    return AlertEvent.model_validate(
+        {
+            "alert_id": row["alert_id"],
+            "project_id": row["project_id"],
+            "type": row["type"],
+            "severity": row["severity"],
+            "message": row["message"],
+            "sent_via": row["sent_via"],
+            "created_at": row["created_at"],
+            "acknowledged": bool(row["acknowledged"]),
+        }
+    )
+
+
+async def save_alert_event(alert: AlertEvent) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO alert_events (
+                alert_id, project_id, type, severity, message, sent_via, created_at, acknowledged
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert.alert_id,
+                alert.project_id,
+                alert.type.value,
+                alert.severity.value,
+                alert.message,
+                alert.sent_via.value,
+                alert.created_at,
+                int(alert.acknowledged),
+            ),
+        )
+        await db.commit()
+
+
+async def get_alert_event(alert_id: str) -> AlertEvent | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM alert_events WHERE alert_id = ?",
+            (alert_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_alert_event(row)
+
+
+async def get_unacknowledged_alerts() -> list[AlertEvent]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM alert_events WHERE acknowledged = 0 ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_alert_event(row) for row in rows]
+
+
+async def acknowledge_alert(alert_id: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE alert_events SET acknowledged = 1 WHERE alert_id = ?",
+            (alert_id,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def count_alerts_for_date(date_str: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM alert_events WHERE date(created_at) = date(?)",
+            (date_str,),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+def _row_to_daily_report(row: aiosqlite.Row) -> DailyReport:
+    import json
+    return DailyReport.model_validate(
+        {
+            "report_id": row["report_id"],
+            "report_date": row["report_date"],
+            "revenue_today": row["revenue_today"],
+            "pipeline": json.loads(row["pipeline"]),
+            "exceptions": json.loads(row["exceptions"]),
+            "new_memories": row["new_memories"],
+            "alerts_sent_today": row["alerts_sent_today"],
+            "generated_at": row["generated_at"],
+        }
+    )
+
+
+async def save_daily_report(report: DailyReport) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO daily_reports (
+                report_id, report_date, revenue_today, pipeline, exceptions,
+                new_memories, alerts_sent_today, generated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report.report_id,
+                report.report_date,
+                report.revenue_today,
+                json.dumps(report.pipeline),
+                json.dumps(report.exceptions),
+                report.new_memories,
+                report.alerts_sent_today,
+                report.generated_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_daily_report(report_date: str) -> DailyReport | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM daily_reports WHERE report_date = ?",
+            (report_date,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_daily_report(row)
+
+
+async def get_revenue_for_date(date_str: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'PAID' AND date(paid_at) = date(?)",
+            (date_str,),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def get_pipeline_counts() -> dict[str, int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT state, COUNT(*) FROM projects GROUP BY state"
+        )
+        rows = await cursor.fetchall()
+        return {row[0]: row[1] for row in rows}
+
+
+async def count_memories_created_on(date_str: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM corporate_memory WHERE date(created_at) = date(?)",
+            (date_str,),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def get_invoices_with_exception_on_date(date_str: str) -> list[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT invoice_id, project_id FROM invoices 
+            WHERE status = 'PAYMENT_EXCEPTION' AND date(created_at) = date(?)
+            """,
+            (date_str,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            f"Invoice {row[0][:8]} ({row[1][:8]}): nominal mismatch"
+            for row in rows
+        ]
+
+
+async def get_token_usage_estimate(project_id: str) -> float:
+    """Mock token usage estimate - returns a value that can be monkeypatched for testing."""
+    return 0.0
+
+
+async def get_last_report_date() -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT report_date FROM daily_reports ORDER BY generated_at DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+
+async def save_last_report_date(report_date: str) -> None:
+    """Track last report date to prevent duplicate reports."""
+    pass  # Using daily_reports table for this
+
+
+async def list_alert_events(acknowledged: bool | None = None) -> list[AlertEvent]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if acknowledged is None:
+            query = "SELECT * FROM alert_events ORDER BY created_at DESC"
+            params = ()
+        elif acknowledged:
+            query = "SELECT * FROM alert_events WHERE acknowledged = 1 ORDER BY created_at DESC"
+            params = ()
+        else:
+            query = "SELECT * FROM alert_events WHERE acknowledged = 0 ORDER BY created_at DESC"
+            params = ()
+        cursor = await db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [_row_to_alert_event(row) for row in rows]

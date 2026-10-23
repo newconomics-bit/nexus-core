@@ -13,6 +13,7 @@ from database import (
     update_project_state,
 )
 from agents.post_mortem import run_post_mortem
+from agents.proactive_alerts import alert_project_blocked
 from core.telegram_bot import send_approval_card
 from models import (
     ApprovalRequest,
@@ -187,6 +188,12 @@ async def run_audit(project_id: str, submission_id: str) -> AuditReport:
         else:
             report_status = AuditReportStatus.ESCALATED
             await update_project_state(project_id, "BLOCKED")
+
+            # Raise proactive alert for blocked project
+            await alert_project_blocked(
+                project_id=project_id,
+                reason=f"QA audit failed after {cycle} cycles. Critical/High findings remain.",
+            )
 
             approval = ApprovalRequest(
                 approval_id=str(uuid.uuid4()),

@@ -4,6 +4,8 @@ from database import (
     update_approval_status,
 )
 from agents.payment_verification import expire_old_qris
+from agents.daily_report import send_daily_report
+from agents.proactive_alerts import scan_alert_triggers
 
 
 async def check_discount_timeouts() -> list[dict]:
@@ -28,6 +30,13 @@ async def check_discount_timeouts() -> list[dict]:
                 ),
             })
 
+            # Raise alert for auto-rejected discount
+            from agents.proactive_alerts import alert_discount_auto_rejected
+            await alert_discount_auto_rejected(
+                project_id=approval.project_id,
+                discount_pct=approval.payload.get("discount_pct", 0),
+            )
+
     return results
 
 
@@ -35,8 +44,16 @@ async def run_scheduler_tick() -> dict:
     discount_results = await check_discount_timeouts()
     expired_qris = await expire_old_qris()
 
+    # Send daily report if time
+    daily_result = await send_daily_report()
+
+    # Scan for proactive alerts
+    alert_results = await scan_alert_triggers()
+
     return {
         "discount_timeouts": discount_results,
         "expired_qris": expired_qris,
+        "daily_report": daily_result,
+        "alerts": [a.alert_id for a in alert_results],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

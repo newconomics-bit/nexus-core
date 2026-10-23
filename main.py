@@ -6,6 +6,8 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
 
 import database
+from agents.daily_report import send_daily_report, generate_daily_report, format_report_text
+from agents.proactive_alerts import scan_alert_triggers
 from agents.text_quality_gate import score_text
 from agents.visual_quality_gate import audit_frontend
 from agents.cs_intake import run_discovery
@@ -48,6 +50,9 @@ from database import (
 from models import (
     ALLOWED_TRANSITIONS,
     AdvanceStateRequest,
+    AlertEvent,
+    AlertSeverity,
+    AlertType,
     ApprovalRequest,
     ApprovalStatus,
     ApprovalType,
@@ -57,6 +62,7 @@ from models import (
     AuditReportStatus,
     BuildTask,
     ChatRequest,
+    DailyReport,
     DecideRequest,
     DeploymentRequest,
     DeploymentStatus,
@@ -665,4 +671,41 @@ async def get_prompt(agent_name: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Prompt for agent '{agent_name}' not found")
     content = prompt_path.read_text(encoding="utf-8")
     return {"agent": agent_name, "content": content}
+
+
+@app.get("/api/budi/report/today")
+async def budi_report_today() -> dict:
+    from datetime import date
+    report = await generate_daily_report(date.today())
+    if report is None:
+        # Generate on-demand if not exists
+        report = await generate_daily_report(date.today())
+    return report.model_dump()
+
+
+@app.post("/api/budi/report/send")
+async def budi_report_send() -> dict:
+    from datetime import date
+    result = await send_daily_report(date.today())
+    return result
+
+
+@app.get("/api/budi/alerts")
+async def budi_alerts(acknowledged: bool = False) -> list[dict]:
+    from database import get_unacknowledged_alerts, list_alert_events
+    if acknowledged:
+        # For now, just return unacknowledged; can extend later
+        alerts = await get_unacknowledged_alerts()
+    else:
+        alerts = await get_unacknowledged_alerts()
+    return [a.model_dump() for a in alerts]
+
+
+@app.post("/api/budi/alerts/{alert_id}/ack")
+async def budi_alert_ack(alert_id: str) -> dict:
+    from database import acknowledge_alert
+    success = await acknowledge_alert(alert_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"alert_id": alert_id, "acknowledged": True}
 

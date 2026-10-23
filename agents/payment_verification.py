@@ -13,6 +13,7 @@ from database import (
     save_qris,
     save_subscription,
 )
+from agents.proactive_alerts import alert_payment_exception
 from models import Invoice, InvoiceStatus, MockLedgerEntry, QrisRequest, QrisStatus, Subscription
 
 
@@ -69,6 +70,15 @@ async def handle_qris_webhook(
     if amount != invoice.amount:
         invoice.status = InvoiceStatus.PAYMENT_EXCEPTION
         await save_invoice(invoice)
+
+        # Raise proactive alert
+        await alert_payment_exception(
+            project_id=invoice.project_id,
+            invoice_id=invoice.invoice_id,
+            expected=invoice.amount,
+            actual=amount,
+        )
+
         return (
             VerificationResult.AMOUNT_MISMATCH,
             f"Amount mismatch: expected {invoice.amount}, got {amount}. Pembayaran kami terima tapi ada selisih/kejanggalan. Tim kami akan follow-up sore ini.",

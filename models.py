@@ -111,6 +111,8 @@ class ApprovalType(str, Enum):
     PAYMENT = "PAYMENT"
     QA_ESCALATION = "QA_ESCALATION"
     DEPLOY_PRODUCTION = "DEPLOY_PRODUCTION"
+    PRICING_CHANGE = "PRICING_CHANGE"
+    PROMPT_UPDATE = "PROMPT_UPDATE"
 
 
 class ApprovalStatus(str, Enum):
@@ -360,4 +362,56 @@ class DailyReport(BaseModel):
     new_memories: int
     alerts_sent_today: int
     generated_at: str
+
+
+class DecisionType(str, Enum):
+    PRICING_CHANGE = "PRICING_CHANGE"
+    FEATURE_REQUEST = "FEATURE_REQUEST"
+    PROMPT_UPDATE = "PROMPT_UPDATE"
+    TECH_STACK_CHANGE = "TECH_STACK_CHANGE"
+    PR_REVIEW = "PR_REVIEW"
+
+
+class DecisionStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class TechnicalDecision(BaseModel):
+    decision_id: str
+    decision_type: DecisionType
+    description: str
+    impact_score: int
+    requires_founder_approval: bool
+    decided_by: str
+    decided_at: str
+    status: DecisionStatus
+
+
+class FeatureRequestStatus(str, Enum):
+    SUBMITTED = "SUBMITTED"
+    EVALUATED = "EVALUATED"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+
+
+class FeatureRequest(BaseModel):
+    request_id: str
+    client_id: str | None = None
+    description: str
+    rice_score: int
+    status: FeatureRequestStatus
+    evaluated_at: str
+    roadmap_target: str
+
+
+class AgentPerformance(BaseModel):
+    agent_name: str
+    date: str
+    token_usage: int
+    success_rate: float
+    error_rate: float
+    tasks_completed: int
+    tasks_failed: int
 

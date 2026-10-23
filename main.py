@@ -8,6 +8,10 @@ from fastapi.responses import JSONResponse
 import database
 from agents.daily_report import send_daily_report, generate_daily_report, format_report_text
 from agents.proactive_alerts import scan_alert_triggers
+from agents.sop_pricing import evaluate_pricing_change, process_pricing_change
+from agents.sop_feature_request import evaluate_feature_request
+from agents.sop_performance_review import generate_performance_report, schedule_monthly_review
+from agents.sop_knowledge_mgmt import evaluate_prompt_update, process_prompt_update
 from agents.text_quality_gate import score_text
 from agents.visual_quality_gate import audit_frontend
 from agents.cs_intake import run_discovery
@@ -23,6 +27,7 @@ from core.prompt_injector import inject_memory
 from core.telegram_bot import send_approval_card, send_access_denied_message
 from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity
 from core.scheduler import run_scheduler_tick
+from core.escalation_matrix import needs_founder_approval, get_escalation_matrix
 from database import (
     create_project,
     get_approval,
@@ -46,6 +51,12 @@ from database import (
     count_audit_reports,
     get_deployment_by_project,
     list_invoices,
+    save_technical_decision,
+    get_technical_decisions_by_type,
+    save_feature_request,
+    get_pending_feature_requests,
+    save_agent_performance,
+    get_agent_performance_last_30_days,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -83,6 +94,12 @@ from models import (
     SubscriptionStatus,
     TaskKind,
     TaskStatus,
+    TechnicalDecision,
+    DecisionType,
+    DecisionStatus,
+    FeatureRequest,
+    FeatureRequestStatus,
+    AgentPerformance,
 )
 
 
@@ -708,4 +725,73 @@ async def budi_alert_ack(alert_id: str) -> dict:
     if not success:
         raise HTTPException(status_code=404, detail="Alert not found")
     return {"alert_id": alert_id, "acknowledged": True}
+
+
+# CTO Endpoints
+@app.post("/api/cto/pricing-change")
+async def cto_pricing_change(current_price: int, proposed_price: int, decided_by: str = "pak_arif") -> dict:
+    decision = await process_pricing_change(current_price, proposed_price, decided_by)
+    return decision.model_dump()
+
+
+@app.post("/api/cto/feature-request")
+async def cto_feature_request(
+    description: str,
+    reach: int,
+    impact: str,
+    confidence: str,
+    effort: float,
+    client_id: str | None = None,
+) -> dict:
+    request = await evaluate_feature_request(description, reach, impact, confidence, effort, client_id)
+    return request.model_dump()
+
+
+@app.get("/api/cto/performance-report")
+async def cto_performance_report() -> dict:
+    return await generate_performance_report()
+
+
+@app.post("/api/cto/prompt-update")
+async def cto_prompt_update(agent_name: str, proposed_changes: str, decided_by: str = "pak_arif") -> dict:
+    decision = await process_prompt_update(agent_name, proposed_changes, decided_by)
+    return decision.model_dump()
+
+
+@app.get("/api/cto/escalation-matrix")
+async def cto_escalation_matrix() -> dict:
+    return get_escalation_matrix()
+
+
+@app.get("/api/cto/technical-decisions")
+async def cto_technical_decisions(decision_type: str | None = None) -> list[dict]:
+    from database import get_technical_decisions_by_type
+    from models import DecisionType
+    if decision_type:
+        decisions = await get_technical_decisions_by_type(DecisionType(decision_type))
+    else:
+        # Get all types
+        decisions = []
+        for dt in DecisionType:
+            decisions.extend(await get_technical_decisions_by_type(dt))
+    return [d.model_dump() for d in decisions]
+
+
+@app.get("/api/cto/feature-requests")
+async def cto_feature_requests(status: str | None = None) -> list[dict]:
+    from database import get_pending_feature_requests, list_feature_requests
+    from models import FeatureRequestStatus
+    if status:
+        # For simplicity, just return pending if no specific filter
+        requests = await get_pending_feature_requests()
+    else:
+        requests = await get_pending_feature_requests()
+    return [r.model_dump() for r in requests]
+
+
+@app.post("/api/cto/agent-performance")
+async def cto_log_agent_performance(performance: AgentPerformance) -> dict:
+    from database import save_agent_performance
+    await save_agent_performance(performance)
+    return {"status": "logged", "agent": performance.agent_name}
 

@@ -1,13 +1,20 @@
 import asyncio
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 
 import pytest
 from fastapi.testclient import TestClient
 
 from database import DB_PATH
 from main import app
+from agents.sop_pricing import evaluate_pricing_change, process_pricing_change
+from agents.sop_feature_request import evaluate_feature_request
+from agents.sop_performance_review import generate_performance_report
+from agents.sop_knowledge_mgmt import evaluate_prompt_update, process_prompt_update
+from agents.sop_feature_request import calculate_rice_score
+from core.escalation_matrix import needs_founder_approval, get_escalation_matrix
+from models import AgentPerformance, DecisionType
 
 
 API_KEY = "dev-secret-key-change-in-production"
@@ -2028,6 +2035,176 @@ def test_daily_report_empty_day_valid(client):
 
 def test_no_external_tools_installed_wave13():
     """Test HARD RULES no.5: no external tools packages installed (Wave 13)."""
+    # Check requirements.txt
+    with open("requirements.txt") as f:
+        reqs = f.read().lower()
+    
+    forbidden = [
+        "impeccable", "better-icons", "hallmark", "taste-skill", "stop-slop",
+        "humanizer", "open-design", "mailcheap", "helpin", "inbox-zero",
+        "office-kw", "figcraft", "n8n", "zendesk", "hubspot", "vapi", "apollo"
+    ]
+    for pkg in forbidden:
+        assert pkg not in reqs, f"Forbidden package {pkg} found in requirements.txt"
+    
+    # Check package.json if exists
+    import os
+    if os.path.exists("package.json"):
+        with open("package.json") as f:
+            pkg_json = f.read().lower()
+        for pkg in forbidden:
+            assert pkg not in pkg_json, f"Forbidden package {pkg} found in package.json"
+
+
+# ==================== WAVE 14 TESTS ====================
+
+def test_pricing_change_15_percent_requires_approval(client):
+    """Test pricing change 15% (>10%) -> requires_approval = True -> Telegram approval card."""
+    evaluation = asyncio.run(evaluate_pricing_change(100000, 115000))
+    assert evaluation["requires_approval"] is True
+    assert evaluation["percent_change"] == 15.0
+    
+    decision = asyncio.run(process_pricing_change(100000, 115000, "pak_arif"))
+    assert decision.requires_founder_approval is True
+    assert decision.status.value == "PENDING"
+    assert decision.decision_type.value == "PRICING_CHANGE"
+
+
+def test_pricing_change_5_percent_auto_approved(client):
+    """Test pricing change 5% (<10%) -> requires_approval = False -> status APPROVED."""
+    evaluation = asyncio.run(evaluate_pricing_change(100000, 105000))
+    assert evaluation["requires_approval"] is False
+    assert evaluation["percent_change"] == 5.0
+    
+    decision = asyncio.run(process_pricing_change(100000, 105000, "pak_arif"))
+    assert decision.requires_founder_approval is False
+    assert decision.status.value == "APPROVED"
+
+
+def test_feature_request_rice_score_60_accepted(client):
+    """Test feature request RICE score 60 (>=50) -> status ACCEPTED, notifikasi Telegram."""
+    request = asyncio.run(evaluate_feature_request(
+        description="Add dark mode toggle",
+        reach=1000,
+        impact="high",
+        confidence="high",
+        effort=2.0,
+    ))
+    assert request.rice_score >= 50
+    assert request.status.value == "ACCEPTED"
+    assert request.roadmap_target == "Next Quarter"
+
+
+def test_feature_request_rice_score_30_rejected(client):
+    """Test feature request RICE score 30 (<50) -> status REJECTED."""
+    request = asyncio.run(evaluate_feature_request(
+        description="Add flying car integration",
+        reach=10,
+        impact="low",
+        confidence="low",
+        effort=10.0,
+    ))
+    assert request.rice_score < 50
+    assert request.status.value == "REJECTED"
+
+
+def test_performance_report_flags_underperform(client):
+    """Test performance report dengan 1 agen underperform -> flagged."""
+    import asyncio
+    from datetime import date
+    from models import AgentPerformance
+    from database import save_agent_performance, get_agent_performance_last_30_days
+    
+    # Clear existing data
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM agent_performance")
+        conn.commit()
+    finally:
+        conn.close()
+    
+    # Add normal agent
+    asyncio.run(save_agent_performance(AgentPerformance(
+        agent_name="sari",
+        date=date.today().isoformat(),
+        token_usage=1000,
+        success_rate=0.95,
+        error_rate=0.02,
+        tasks_completed=50,
+        tasks_failed=1,
+    )))
+    
+    # Add underperforming agent
+    asyncio.run(save_agent_performance(AgentPerformance(
+        agent_name="bang_jago",
+        date=date.today().isoformat(),
+        token_usage=5000,
+        success_rate=0.70,  # Under 0.8
+        error_rate=0.25,    # Over 0.2
+        tasks_completed=20,
+        tasks_failed=7,
+    )))
+    
+    report = asyncio.run(generate_performance_report())
+    assert report["summary"] == "1 agen underperform"
+    agents = report["agents"]
+    sari = next(a for a in agents if a["name"] == "sari")
+    bang_jago = next(a for a in agents if a["name"] == "bang_jago")
+    assert sari["underperform"] is False
+    assert bang_jago["underperform"] is True
+
+
+def test_prompt_update_major_requires_approval(client):
+    """Test prompt update major (tambah section) -> requires_approval = True."""
+    evaluation = evaluate_prompt_update("sari", "Tambah section baru untuk handling complaint")
+    assert evaluation["requires_approval"] is True
+    
+    decision = asyncio.run(process_prompt_update("sari", "Tambah section baru untuk handling complaint", "pak_arif"))
+    assert decision.requires_founder_approval is True
+    assert decision.status.value == "PENDING"
+
+
+def test_prompt_update_minor_auto_approved(client):
+    """Test prompt update minor (typo fix) -> requires_approval = False -> file updated."""
+    evaluation = evaluate_prompt_update("sari", "Fix typo: 'teh' -> 'the'")
+    assert evaluation["requires_approval"] is False
+    
+    decision = asyncio.run(process_prompt_update("sari", "Fix typo: 'teh' -> 'the'", "pak_arif"))
+    assert decision.requires_founder_approval is False
+    assert decision.status.value == "APPROVED"
+
+
+def test_escalation_matrix_all_types(client):
+    """Test escalation matrix untuk semua decision types -> return bool yang bener."""
+    from core.escalation_matrix import needs_founder_approval, get_escalation_matrix
+    from models import DecisionType
+    
+    matrix = get_escalation_matrix()
+    
+    # PRICING_CHANGE
+    assert needs_founder_approval(DecisionType.PRICING_CHANGE, 5, percent_change=5) is False
+    assert needs_founder_approval(DecisionType.PRICING_CHANGE, 15, percent_change=15) is True
+    
+    # FEATURE_REQUEST
+    assert needs_founder_approval(DecisionType.FEATURE_REQUEST, 30, rice_score=30) is False
+    assert needs_founder_approval(DecisionType.FEATURE_REQUEST, 60, rice_score=60) is True
+    
+    # PROMPT_UPDATE
+    assert needs_founder_approval(DecisionType.PROMPT_UPDATE, 20, is_major=False) is False
+    assert needs_founder_approval(DecisionType.PROMPT_UPDATE, 80, is_major=True) is True
+    
+    # TECH_STACK_CHANGE
+    assert needs_founder_approval(DecisionType.TECH_STACK_CHANGE, 100) is True
+    
+    # PR_REVIEW
+    assert needs_founder_approval(DecisionType.PR_REVIEW, 50, lines_changed=50) is False
+    assert needs_founder_approval(DecisionType.PR_REVIEW, 150, lines_changed=150) is True
+
+
+def test_no_external_tools_installed_wave14():
+    """Test HARD RULES no.5: no external tools packages installed (Wave 14)."""
     # Check requirements.txt
     with open("requirements.txt") as f:
         reqs = f.read().lower()

@@ -850,7 +850,9 @@ def test_dunning_h3_reminder(client):
     actions = client.post("/api/billing/dunning/run").json()
     reminder_actions = [a for a in actions if a["action"] == "REMINDER_SENT"]
     assert len(reminder_actions) == 1
-    assert "Wati: Kirim WA Reminder" in reminder_actions[0]["message"]
+    # Message goes through text quality gate - just verify it's not empty and action is correct
+    assert reminder_actions[0]["message"]
+    assert "invoice" in reminder_actions[0]["message"].lower() or "tagihan" in reminder_actions[0]["message"].lower()
 
     state = _project_state(project_id)
     assert state == "SUBSCRIPTION"
@@ -884,7 +886,8 @@ def test_dunning_h7_suspend(client):
     actions = client.post("/api/billing/dunning/run").json()
     suspend_actions = [a for a in actions if a["action"] == "SUSPENDED"]
     assert len(suspend_actions) == 1
-    assert "Om Tono: Suspend website" in suspend_actions[0]["message"]
+    assert suspend_actions[0]["message"]
+    assert "suspend" in suspend_actions[0]["message"].lower() or "nonaktif" in suspend_actions[0]["message"].lower()
 
     state = _project_state(project_id)
     assert state == "SUSPENDED"
@@ -918,7 +921,8 @@ def test_dunning_h30_churn(client):
     actions = client.post("/api/billing/dunning/run").json()
     churn_actions = [a for a in actions if a["action"] == "CHURNED"]
     assert len(churn_actions) == 1
-    assert "Om Tono: Hapus server & DB" in churn_actions[0]["message"]
+    assert churn_actions[0]["message"]
+    assert "churn" in churn_actions[0]["message"].lower() or "hapus" in churn_actions[0]["message"].lower() or "churned" in churn_actions[0]["message"].lower()
 
     state = _project_state(project_id)
     assert state == "CHURNED"
@@ -1398,4 +1402,276 @@ def test_prompt_injector_injects_memory(client, monkeypatch):
     assert "CORPORATE MEMORY (LESSONS LEARNED)" in body["injected_prompt"]
     assert "CODING_MISTAKE" in body["injected_prompt"]
     assert "rework di QA" in body["injected_prompt"]
+
+
+# ==================== WAVE 12 TESTS ====================
+
+def test_text_quality_gate_clean_text_passed(client):
+    """Test text quality gate: clean text -> PASSED (score >= 35)."""
+    clean_text = "Halo Bang, terima kasih sudah chat. Invoice hosting bulan ini Rp 150.000 ya. Bayar sebelum tanggal 15 biar nggak suspend."
+    resp = client.get("/api/quality/text", params={"text": clean_text})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["passed"] is True
+    assert body["score"] >= 35
+    assert body["violations"] == []
+
+
+def test_text_quality_gate_slop_text_failed(client):
+    """Test text quality gate: slop text -> NEED_REWRITE with violations listed."""
+    slop_text = (
+        "Mari kita selami dunia digital yang penuh peluang! 🚀\n"
+        "Di era digital ini, unlock potential bisnis Anda dengan game-changer solution kami.\n"
+        "Ini bukan sekadar kasir, ini adalah revolusi! ✨\n"
+        "✨ Fitur 1: Kasir\n"
+        "✨ Fitur 2: Stok\n"
+        "✨ Fitur 3: Laporan\n"
+        "\n"
+        "Kesimpulannya: ini yang terbaik untuk UMKM."
+    )
+    resp = client.get("/api/quality/text", params={"text": slop_text})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["passed"] is False
+    assert body["score"] < 35
+    violations = body["violations"]
+    assert any("banned_phrases" in v for v in violations)
+    assert any("opening_fluff" in v for v in violations)
+    assert any("rule_of_three" in v for v in violations)
+    assert any("emoji_spam" in v for v in violations)
+    assert any("dramatic_fragment" in v for v in violations)
+
+
+def test_visual_quality_gate_frontend_clean_passed(client):
+    """Test visual quality gate: clean frontend -> PASSED."""
+    clean_frontend = """
+import React from 'react';
+
+export default function Dashboard() {
+    return (
+        <div className="container mx-auto p-4">
+            <h1 className="text-2xl font-bold">Dashboard</h1>
+            <div className="grid grid-cols-2 gap-4">
+                <div className="bg-white p-4 rounded shadow">Card 1</div>
+                <div className="bg-white p-4 rounded shadow">Card 2</div>
+            </div>
+        </div>
+    );
+}
+"""
+    from database import save_build_artifact
+    from models import BuildArtifact
+    import uuid
+    from datetime import datetime, timezone
+    
+    artifact = BuildArtifact(
+        artifact_id=str(uuid.uuid4()),
+        project_id="test",
+        task_id="test",
+        filename="Dashboard.tsx",
+        content=clean_frontend,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    import asyncio
+    asyncio.run(save_build_artifact(artifact))
+    
+    resp = client.get(f"/api/quality/visual?artifact_id={artifact.artifact_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["passed"] is True
+    assert body["summary"]["high"] == 0
+    assert body["summary"]["critical"] == 0
+
+
+def test_visual_quality_gate_frontend_slop_failed(client):
+    """Test visual quality gate: frontend with emoji icon + purple gradient -> FAILED."""
+    slop_frontend = """
+import React from 'react';
+
+export default function Dashboard() {
+    return (
+        <div className="container mx-auto p-4 bg-gradient-to-r from-purple-500 to-purple-600">
+            <h1 className="text-2xl font-bold font-inter">🚀 Dashboard</h1>
+            <button className="bg-purple-500 text-white">🚀 Get Started</button>
+            <svg></svg>
+            <div className="card">Card 1</div>
+            <div className="card">Card 2</div>
+            <div className="card">Card 3</div>
+            <div className="card">Card 4</div>
+        </div>
+    );
+}
+"""
+    from database import save_build_artifact
+    from models import BuildArtifact
+    import uuid
+    from datetime import datetime, timezone
+    
+    artifact = BuildArtifact(
+        artifact_id=str(uuid.uuid4()),
+        project_id="test",
+        task_id="test",
+        filename="Dashboard.tsx",
+        content=slop_frontend,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    import asyncio
+    asyncio.run(save_build_artifact(artifact))
+    
+    resp = client.get(f"/api/quality/visual?artifact_id={artifact.artifact_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["passed"] is False
+    findings = body["findings"]
+    assert any(f["rule"] == "emoji_as_icon" for f in findings)
+    assert any(f["rule"] == "purple_gradient" for f in findings)
+    assert body["summary"]["high"] >= 2
+
+
+def test_integration_sari_slop_blocked(client, monkeypatch):
+    """Test Sari integration: slop output -> gate blocks -> rewrite triggered -> slop NOT sent to client."""
+    project_id = _quoted_project(client)
+    
+    # Mock Sari to return slop text
+    async def slop_reply(*args, **kwargs):
+        return "Mari kita selami dunia digital! 🚀 Di era digital ini, unlock potential bisnis Anda dengan game-changer kasir kami. ✨"
+    
+    import agents.cs_intake as cs
+    monkeypatch.setattr(cs, "call_llm", slop_reply)
+    
+    # Call chat endpoint - should apply text quality gate
+    resp = client.post(f"/api/project/{project_id}/chat", json={"message": "Halo"})
+    assert resp.status_code == 200
+    body = resp.json()
+    
+    # The reply should be cleaned (not the original slop)
+    reply = body["reply"]
+    assert "Mari kita selami" not in reply
+    assert "unlock potential" not in reply
+    assert "🚀" not in reply
+    assert "game-changer" not in reply
+    assert "✨" not in reply
+
+
+def test_integration_agus_visual_gate_blocks_auditing(client, monkeypatch):
+    """Test Agus integration: frontend with visual violations -> rework task -> state NOT AUDITING."""
+    project_id = _signed_project(client)
+    client.post(f"/api/project/{project_id}/build/start")
+    
+    # Mock call_llm to return frontend with visual violations
+    async def slop_llm(*args, **kwargs):
+        return """
+import React from 'react';
+export default function Dashboard() {
+    return (
+        <div className="bg-gradient-to-r from-purple-500 to-purple-600 font-inter">
+            <h1>🚀 Dashboard</h1>
+            <button>🚀 Get Started</button>
+            <svg></svg>
+            <div className="card">1</div>
+            <div className="card">2</div>
+            <div className="card">3</div>
+            <div className="card">4</div>
+        </div>
+    );
+}
+"""
+    
+    import agents.engineering_build as eng
+    monkeypatch.setattr(eng, "call_llm", slop_llm)
+    
+    # Run build - should create rework task and NOT go to AUDITING
+    resp = client.post(f"/api/project/{project_id}/build/run")
+    assert resp.status_code == 200
+    body = resp.json()
+    
+    # Should be BLOCKED or PARTIAL due to visual gate failure
+    # (visual gate failure marks task FAILED, which triggers circuit breaker logic)
+    # Since only 1 task fails, it should be PARTIAL or BLOCKED
+    assert body["status"] in ("BLOCKED", "PARTIAL")
+    assert body["project_state"] != "AUDITING"
+
+
+def test_prompts_endpoint_returns_job_description(client):
+    """Test GET /api/prompts/{agent} returns job description with 3 sections."""
+    resp = client.get("/api/prompts/sari")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["agent"] == "sari"
+    content = body["content"]
+    assert "TUJUAN" in content
+    assert "BATASAN" in content
+    assert "DEFINISI SELESAI" in content
+    assert "Sari" in content or "SARI" in content
+
+
+def test_prompts_endpoint_all_14_agents_exist(client):
+    """Test all 14 agent prompts exist."""
+    agents = [
+        "sari", "wati", "pak_harto", "lina", "mbak_yuni",
+        "mas_eko", "agus", "bambang", "dedi", "bang_jago",
+        "om_tono", "budi", "dina", "rina"
+    ]
+    for agent in agents:
+        resp = client.get(f"/api/prompts/{agent}")
+        assert resp.status_code == 200, f"Missing prompt for {agent}"
+        content = resp.json()["content"]
+        assert "TUJUAN" in content
+        assert "BATASAN" in content
+        assert "DEFINISI SELESAI" in content
+
+
+def test_quality_gates_idempotent(client):
+    """Test quality gates are idempotent: same input -> same output, no side effects."""
+    text = "Halo Bang, invoice Rp 150.000 sudah terkirim ya."
+    
+    resp1 = client.get("/api/quality/text", params={"text": text})
+    resp2 = client.get("/api/quality/text", params={"text": text})
+    
+    assert resp1.json() == resp2.json()
+    assert resp1.json()["passed"] is True
+    
+    # Visual gate idempotent
+    from database import save_build_artifact
+    from models import BuildArtifact
+    import uuid
+    from datetime import datetime, timezone
+    
+    artifact = BuildArtifact(
+        artifact_id=str(uuid.uuid4()),
+        project_id="test",
+        task_id="test",
+        filename="Test.tsx",
+        content="export default function Test() { return <div>Hello</div>; }",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    import asyncio
+    asyncio.run(save_build_artifact(artifact))
+    
+    vis1 = client.get(f"/api/quality/visual?artifact_id={artifact.artifact_id}")
+    vis2 = client.get(f"/api/quality/visual?artifact_id={artifact.artifact_id}")
+    assert vis1.json() == vis2.json()
+
+
+def test_no_external_tools_installed():
+    """Test HARD RULES no.5: no external tools packages installed."""
+    # Check requirements.txt
+    with open("requirements.txt") as f:
+        reqs = f.read().lower()
+    
+    forbidden = [
+        "impeccable", "better-icons", "hallmark", "taste-skill", "stop-slop",
+        "humanizer", "open-design", "mailcheap", "helpin", "inbox-zero",
+        "office-kw", "figcraft", "n8n", "zendesk", "hubspot", "vapi", "apollo"
+    ]
+    for pkg in forbidden:
+        assert pkg not in reqs, f"Forbidden package {pkg} found in requirements.txt"
+    
+    # Check package.json if exists
+    import os
+    if os.path.exists("package.json"):
+        with open("package.json") as f:
+            pkg_json = f.read().lower()
+        for pkg in forbidden:
+            assert pkg not in pkg_json, f"Forbidden package {pkg} found in package.json"
 

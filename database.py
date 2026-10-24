@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus
 
 DB_PATH = "rakitdigital.db"
 
@@ -355,6 +355,49 @@ async def init_db() -> None:
                 factors_json TEXT NOT NULL,
                 flagged INTEGER NOT NULL DEFAULT 0,
                 computed_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backups (
+                backup_id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                checksum TEXT NOT NULL,
+                status TEXT NOT NULL,
+                verified INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS incidents (
+                incident_id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                status TEXT NOT NULL,
+                detected_at TEXT NOT NULL,
+                mitigated_at TEXT,
+                resolved_at TEXT,
+                timeline_json TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS drills (
+                drill_id TEXT PRIMARY KEY,
+                backup_id TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                notes TEXT
             )
             """
         )
@@ -2055,3 +2098,282 @@ async def list_client_health(flagged: bool | None = None) -> list[ClientHealth]:
         cursor = await db.execute(query, tuple(params))
         rows = await cursor.fetchall()
         return [_row_to_client_health(row) for row in rows]
+
+
+def _row_to_backup(row: aiosqlite.Row) -> BackupRecord:
+    return BackupRecord.model_validate(
+        {
+            "backup_id": row["backup_id"],
+            "type": row["type"],
+            "created_at": row["created_at"],
+            "size_bytes": row["size_bytes"],
+            "checksum": row["checksum"],
+            "status": row["status"],
+            "verified": bool(row["verified"]),
+        }
+    )
+
+
+async def save_backup(backup: BackupRecord) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO backups (
+                backup_id, type, created_at, size_bytes, checksum, status, verified
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(backup_id) DO UPDATE SET
+                type = excluded.type,
+                created_at = excluded.created_at,
+                size_bytes = excluded.size_bytes,
+                checksum = excluded.checksum,
+                status = excluded.status,
+                verified = excluded.verified
+            """,
+            (
+                backup.backup_id,
+                backup.type.value,
+                backup.created_at,
+                backup.size_bytes,
+                backup.checksum,
+                backup.status.value,
+                int(backup.verified),
+            ),
+        )
+        await db.commit()
+
+
+async def get_backup(backup_id: str) -> BackupRecord | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM backups WHERE backup_id = ?",
+            (backup_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_backup(row)
+
+
+async def get_latest_backup() -> BackupRecord | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM backups WHERE status = 'SUCCESS' ORDER BY created_at DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_backup(row)
+
+
+def _row_to_incident(row: aiosqlite.Row) -> Incident:
+    import json
+    return Incident.model_validate(
+        {
+            "incident_id": row["incident_id"],
+            "type": row["type"],
+            "severity": row["severity"],
+            "status": row["status"],
+            "detected_at": row["detected_at"],
+            "mitigated_at": row["mitigated_at"],
+            "resolved_at": row["resolved_at"],
+            "timeline": json.loads(row["timeline_json"]),
+        }
+    )
+
+
+async def save_incident(incident: Incident) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO incidents (
+                incident_id, type, severity, status, detected_at, mitigated_at, resolved_at, timeline_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(incident_id) DO UPDATE SET
+                type = excluded.type,
+                severity = excluded.severity,
+                status = excluded.status,
+                detected_at = excluded.detected_at,
+                mitigated_at = excluded.mitigated_at,
+                resolved_at = excluded.resolved_at,
+                timeline_json = excluded.timeline_json
+            """,
+            (
+                incident.incident_id,
+                incident.type.value,
+                incident.severity.value,
+                incident.status.value,
+                incident.detected_at,
+                incident.mitigated_at,
+                incident.resolved_at,
+                json.dumps(incident.timeline),
+            ),
+        )
+        await db.commit()
+
+
+async def get_incident(incident_id: str) -> Incident | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM incidents WHERE incident_id = ?",
+            (incident_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_incident(row)
+
+
+async def get_open_incidents() -> list[Incident]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM incidents WHERE status = 'OPEN' ORDER BY detected_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_incident(row) for row in rows]
+
+
+async def get_incidents_by_type_open(incident_type: str) -> list[Incident]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM incidents WHERE type = ? AND status = 'OPEN' ORDER BY detected_at DESC",
+            (incident_type,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_incident(row) for row in rows]
+
+
+def _row_to_drill(row: aiosqlite.Row) -> DrillResult:
+    return DrillResult.model_validate(
+        {
+            "drill_id": row["drill_id"],
+            "backup_id": row["backup_id"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "status": row["status"],
+            "notes": row["notes"],
+        }
+    )
+
+
+async def save_drill(drill: DrillResult) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO drills (
+                drill_id, backup_id, started_at, finished_at, status, notes
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(drill_id) DO UPDATE SET
+                backup_id = excluded.backup_id,
+                started_at = excluded.started_at,
+                finished_at = excluded.finished_at,
+                status = excluded.status,
+                notes = excluded.notes
+            """,
+            (
+                drill.drill_id,
+                drill.backup_id,
+                drill.started_at,
+                drill.finished_at,
+                drill.status.value,
+                drill.notes,
+            ),
+        )
+        await db.commit()
+
+
+async def get_drill(drill_id: str) -> DrillResult | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM drills WHERE drill_id = ?",
+            (drill_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_drill(row)
+
+
+async def snapshot_core_tables() -> dict:
+    """Snapshot core tables to JSON for backup."""
+    tables = ["projects", "invoices", "contracts", "corporate_memory", "onboarding_plans"]
+    snapshot = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        for table in tables:
+            cursor = await db.execute(f"SELECT * FROM {table}")
+            rows = await cursor.fetchall()
+            snapshot[table] = [dict(row) for row in rows]
+    return snapshot
+
+
+async def restore_snapshot_to_temp(snapshot: dict) -> dict:
+    """Restore snapshot to a temporary in-memory database and return record counts."""
+    counts = {}
+    async with aiosqlite.connect(":memory:") as db:
+        # Recreate tables
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY, client_name TEXT, state TEXT, spec_json TEXT, created_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                invoice_id TEXT PRIMARY KEY, project_id TEXT, amount INTEGER, due_date TEXT, status TEXT, paid_at TEXT, created_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS contracts (
+                contract_id TEXT PRIMARY KEY, project_id TEXT, contract_type TEXT, template_name TEXT, content TEXT, status TEXT, sent_at TEXT, signed_at TEXT, expires_at TEXT, created_at TEXT, client_email TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS corporate_memory (
+                memory_id TEXT PRIMARY KEY, project_id TEXT, category TEXT, lesson_text TEXT, severity TEXT, target_agent TEXT, created_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS onboarding_plans (
+                plan_id TEXT PRIMARY KEY, project_id TEXT, created_at TEXT, items_json TEXT
+            )
+        """)
+        for table, rows in snapshot.items():
+            if not rows:
+                counts[table] = 0
+                continue
+            cols = ", ".join(rows[0].keys())
+            placeholders = ", ".join(["?"] * len(rows[0]))
+            await db.executemany(f"INSERT INTO {table} ({cols}) VALUES ({placeholders})", [tuple(row.values()) for row in rows])
+            counts[table] = len(rows)
+    return counts
+
+
+async def get_disk_usage_percent() -> float:
+    """Get disk usage percentage. Mockable for testing."""
+    import shutil
+    total, used, free = shutil.disk_usage("/")
+    return (used / total) * 100
+
+
+async def get_last_backup_date() -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT created_at FROM backups WHERE status = 'SUCCESS' ORDER BY created_at DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+
+async def get_last_drill_date() -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT finished_at FROM drills ORDER BY finished_at DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None

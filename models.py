@@ -304,6 +304,7 @@ class MemoryCategory(str, Enum):
     QA_BYPASS = "QA_BYPASS"
     FINANCE_MARGIN_LEAK = "FINANCE_MARGIN_LEAK"
     CLIENT_CHURN_REASON = "CLIENT_CHURN_REASON"
+    OPS_INCIDENT = "OPS_INCIDENT"
 
 
 class MemorySeverity(str, Enum):
@@ -329,6 +330,11 @@ class AlertType(str, Enum):
     TOKEN_CAP_NEAR = "TOKEN_CAP_NEAR"
     MEMORY_CREATED = "MEMORY_CREATED"
     DEPLOY_READY = "DEPLOY_READY"
+    DB_DOWN = "DB_DOWN"
+    BACKUP_STALE = "BACKUP_STALE"
+    BACKUP_FAILED = "BACKUP_FAILED"
+    DISK_FULL = "DISK_FULL"
+    DRILL_FAILED = "DRILL_FAILED"
 
 
 class AlertSeverity(str, Enum):
@@ -495,4 +501,75 @@ class ClientHealth(BaseModel):
     factors: dict
     flagged: bool
     computed_at: str
+
+
+class BackupType(str, Enum):
+    DB = "DB"
+    ARTIFACTS = "ARTIFACTS"
+
+
+class BackupStatus(str, Enum):
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
+class BackupRecord(BaseModel):
+    backup_id: str
+    type: BackupType
+    created_at: str
+    size_bytes: int
+    checksum: str
+    status: BackupStatus
+    verified: bool = False
+
+
+class IncidentType(str, Enum):
+    DB_DOWN = "DB_DOWN"
+    BACKUP_STALE = "BACKUP_STALE"
+    BACKUP_FAILED = "BACKUP_FAILED"
+    DISK_FULL = "DISK_FULL"
+    DRILL_FAILED = "DRILL_FAILED"
+
+
+class IncidentSeverity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+class IncidentStatus(str, Enum):
+    OPEN = "OPEN"
+    MITIGATED = "MITIGATED"
+    RESOLVED = "RESOLVED"
+
+
+class IncidentTimelineEntry(BaseModel):
+    at: str
+    action: str
+    by: str
+
+
+class Incident(BaseModel):
+    incident_id: str
+    type: IncidentType
+    severity: IncidentSeverity
+    status: IncidentStatus = IncidentStatus.OPEN
+    detected_at: str
+    mitigated_at: str | None = None
+    resolved_at: str | None = None
+    timeline: list[dict] = []
+
+
+class DrillStatus(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+
+
+class DrillResult(BaseModel):
+    drill_id: str
+    backup_id: str
+    started_at: str
+    finished_at: str
+    status: DrillStatus
+    notes: str
 

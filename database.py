@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus
 
 DB_PATH = "rakitdigital.db"
 
@@ -398,6 +398,108 @@ async def init_db() -> None:
                 finished_at TEXT NOT NULL,
                 status TEXT NOT NULL,
                 notes TEXT
+            )
+            """
+        )
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaigns (
+                campaign_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                target_audience TEXT NOT NULL,
+                channel_mix TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaign_kpis (
+                kpi_id TEXT PRIMARY KEY,
+                campaign_id TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                target_value REAL NOT NULL,
+                actual_value REAL NOT NULL,
+                measured_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS icp_definitions (
+                icp_id TEXT PRIMARY KEY,
+                business_type TEXT NOT NULL,
+                firmographics_json TEXT NOT NULL,
+                technographics_json TEXT NOT NULL,
+                psychographics_json TEXT NOT NULL,
+                buyer_personas_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS competitive_battlecards (
+                battlecard_id TEXT PRIMARY KEY,
+                competitor_name TEXT NOT NULL,
+                strengths_json TEXT NOT NULL,
+                weaknesses_json TEXT NOT NULL,
+                our_advantages_json TEXT NOT NULL,
+                when_to_win_json TEXT NOT NULL,
+                when_to_lose_json TEXT NOT NULL,
+                talk_tracks_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ab_tests (
+                test_id TEXT PRIMARY KEY,
+                campaign_id TEXT NOT NULL,
+                variant_a TEXT NOT NULL,
+                variant_b TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                sample_size_a INTEGER NOT NULL,
+                sample_size_b INTEGER NOT NULL,
+                conversion_a REAL NOT NULL DEFAULT 0.0,
+                conversion_b REAL NOT NULL DEFAULT 0.0,
+                winner TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lead_gen_results (
+                lead_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                business_name TEXT NOT NULL,
+                contact_info_json TEXT NOT NULL,
+                niche TEXT NOT NULL,
+                city TEXT NOT NULL,
+                generated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS partnership_evaluations (
+                partnership_id TEXT PRIMARY KEY,
+                partner_name TEXT NOT NULL,
+                partner_type TEXT NOT NULL,
+                criteria_scores_json TEXT NOT NULL,
+                total_score INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL
             )
             """
         )
@@ -2377,3 +2479,483 @@ async def get_last_drill_date() -> str | None:
         )
         row = await cursor.fetchone()
         return row[0] if row else None
+
+
+def _row_to_campaign(row: aiosqlite.Row) -> Campaign:
+    import json
+    return Campaign.model_validate(
+        {
+            "campaign_id": row["campaign_id"],
+            "name": row["name"],
+            "objective": row["objective"],
+            "target_audience": row["target_audience"],
+            "channel_mix": json.loads(row["channel_mix"]),
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "completed_at": row["completed_at"],
+        }
+    )
+
+
+async def save_campaign(campaign: Campaign) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO campaigns (
+                campaign_id, name, objective, target_audience, channel_mix,
+                status, created_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(campaign_id) DO UPDATE SET
+                name = excluded.name,
+                objective = excluded.objective,
+                target_audience = excluded.target_audience,
+                channel_mix = excluded.channel_mix,
+                status = excluded.status,
+                created_at = excluded.created_at,
+                completed_at = excluded.completed_at
+            """,
+            (
+                campaign.campaign_id,
+                campaign.name,
+                campaign.objective.value,
+                campaign.target_audience,
+                json.dumps(campaign.channel_mix),
+                campaign.status.value,
+                campaign.created_at,
+                campaign.completed_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_campaign(campaign_id: str) -> Campaign | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM campaigns WHERE campaign_id = ?",
+            (campaign_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_campaign(row)
+
+
+async def list_campaigns() -> list[Campaign]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM campaigns ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_campaign(row) for row in rows]
+
+
+async def get_active_campaigns() -> list[Campaign]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM campaigns WHERE status = 'ACTIVE' ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_campaign(row) for row in rows]
+
+
+def _row_to_campaign_kpi(row: aiosqlite.Row) -> CampaignKPI:
+    return CampaignKPI.model_validate(
+        {
+            "kpi_id": row["kpi_id"],
+            "campaign_id": row["campaign_id"],
+            "metric_name": row["metric_name"],
+            "target_value": row["target_value"],
+            "actual_value": row["actual_value"],
+            "measured_at": row["measured_at"],
+        }
+    )
+
+
+async def save_campaign_kpi(kpi: CampaignKPI) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO campaign_kpis (
+                kpi_id, campaign_id, metric_name, target_value, actual_value, measured_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(kpi_id) DO UPDATE SET
+                campaign_id = excluded.campaign_id,
+                metric_name = excluded.metric_name,
+                target_value = excluded.target_value,
+                actual_value = excluded.actual_value,
+                measured_at = excluded.measured_at
+            """,
+            (
+                kpi.kpi_id,
+                kpi.campaign_id,
+                kpi.metric_name,
+                kpi.target_value,
+                kpi.actual_value,
+                kpi.measured_at,
+            ),
+        )
+        await db.commit()
+
+
+def _row_to_icp(row: aiosqlite.Row) -> ICPDefinition:
+    import json
+    return ICPDefinition.model_validate(
+        {
+            "icp_id": row["icp_id"],
+            "business_type": row["business_type"],
+            "firmographics": json.loads(row["firmographics_json"]),
+            "technographics": json.loads(row["technographics_json"]),
+            "psychographics": json.loads(row["psychographics_json"]),
+            "buyer_personas": json.loads(row["buyer_personas_json"]),
+            "created_at": row["created_at"],
+        }
+    )
+
+
+async def save_icp(icp: ICPDefinition) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO icp_definitions (
+                icp_id, business_type, firmographics_json, technographics_json,
+                psychographics_json, buyer_personas_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(icp_id) DO UPDATE SET
+                business_type = excluded.business_type,
+                firmographics_json = excluded.firmographics_json,
+                technographics_json = excluded.technographics_json,
+                psychographics_json = excluded.psychographics_json,
+                buyer_personas_json = excluded.buyer_personas_json,
+                created_at = excluded.created_at
+            """,
+            (
+                icp.icp_id,
+                icp.business_type,
+                json.dumps(icp.firmographics),
+                json.dumps(icp.technographics),
+                json.dumps(icp.psychographics),
+                json.dumps(icp.buyer_personas),
+                icp.created_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_icp(icp_id: str) -> ICPDefinition | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM icp_definitions WHERE icp_id = ?",
+            (icp_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_icp(row)
+
+
+def _row_to_battlecard(row: aiosqlite.Row) -> CompetitiveBattlecard:
+    import json
+    return CompetitiveBattlecard.model_validate(
+        {
+            "battlecard_id": row["battlecard_id"],
+            "competitor_name": row["competitor_name"],
+            "strengths": json.loads(row["strengths_json"]),
+            "weaknesses": json.loads(row["weaknesses_json"]),
+            "our_advantages": json.loads(row["our_advantages_json"]),
+            "when_to_win": json.loads(row["when_to_win_json"]),
+            "when_to_lose": json.loads(row["when_to_lose_json"]),
+            "talk_tracks": json.loads(row["talk_tracks_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+    )
+
+
+async def save_battlecard(battlecard: CompetitiveBattlecard) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO competitive_battlecards (
+                battlecard_id, competitor_name, strengths_json, weaknesses_json,
+                our_advantages_json, when_to_win_json, when_to_lose_json,
+                talk_tracks_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(battlecard_id) DO UPDATE SET
+                competitor_name = excluded.competitor_name,
+                strengths_json = excluded.strengths_json,
+                weaknesses_json = excluded.weaknesses_json,
+                our_advantages_json = excluded.our_advantages_json,
+                when_to_win_json = excluded.when_to_win_json,
+                when_to_lose_json = excluded.when_to_lose_json,
+                talk_tracks_json = excluded.talk_tracks_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                battlecard.battlecard_id,
+                battlecard.competitor_name,
+                json.dumps(battlecard.strengths),
+                json.dumps(battlecard.weaknesses),
+                json.dumps(battlecard.our_advantages),
+                json.dumps(battlecard.when_to_win),
+                json.dumps(battlecard.when_to_lose),
+                json.dumps(battlecard.talk_tracks),
+                battlecard.created_at,
+                battlecard.updated_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_battlecard(battlecard_id: str) -> CompetitiveBattlecard | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM competitive_battlecards WHERE battlecard_id = ?",
+            (battlecard_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_battlecard(row)
+
+
+async def get_battlecards() -> list[CompetitiveBattlecard]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM competitive_battlecards ORDER BY updated_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_battlecard(row) for row in rows]
+
+
+def _row_to_ab_test(row: aiosqlite.Row) -> ABTest:
+    return ABTest.model_validate(
+        {
+            "test_id": row["test_id"],
+            "campaign_id": row["campaign_id"],
+            "variant_a": row["variant_a"],
+            "variant_b": row["variant_b"],
+            "metric": row["metric"],
+            "sample_size_a": row["sample_size_a"],
+            "sample_size_b": row["sample_size_b"],
+            "conversion_a": row["conversion_a"],
+            "conversion_b": row["conversion_b"],
+            "winner": row["winner"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+        }
+    )
+
+
+async def save_ab_test(test: ABTest) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO ab_tests (
+                test_id, campaign_id, variant_a, variant_b, metric,
+                sample_size_a, sample_size_b, conversion_a, conversion_b,
+                winner, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(test_id) DO UPDATE SET
+                campaign_id = excluded.campaign_id,
+                variant_a = excluded.variant_a,
+                variant_b = excluded.variant_b,
+                metric = excluded.metric,
+                sample_size_a = excluded.sample_size_a,
+                sample_size_b = excluded.sample_size_b,
+                conversion_a = excluded.conversion_a,
+                conversion_b = excluded.conversion_b,
+                winner = excluded.winner,
+                status = excluded.status,
+                created_at = excluded.created_at
+            """,
+            (
+                test.test_id,
+                test.campaign_id,
+                test.variant_a,
+                test.variant_b,
+                test.metric,
+                test.sample_size_a,
+                test.sample_size_b,
+                test.conversion_a,
+                test.conversion_b,
+                test.winner,
+                test.status.value,
+                test.created_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_ab_test(test_id: str) -> ABTest | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM ab_tests WHERE test_id = ?",
+            (test_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_ab_test(row)
+
+
+def _row_to_lead(row: aiosqlite.Row) -> LeadGenResult:
+    import json
+    return LeadGenResult.model_validate(
+        {
+            "lead_id": row["lead_id"],
+            "source": row["source"],
+            "business_name": row["business_name"],
+            "contact_info": json.loads(row["contact_info_json"]),
+            "niche": row["niche"],
+            "city": row["city"],
+            "generated_at": row["generated_at"],
+        }
+    )
+
+
+async def save_lead(lead: LeadGenResult) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO lead_gen_results (
+                lead_id, source, business_name, contact_info_json,
+                niche, city, generated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(lead_id) DO UPDATE SET
+                source = excluded.source,
+                business_name = excluded.business_name,
+                contact_info_json = excluded.contact_info_json,
+                niche = excluded.niche,
+                city = excluded.city,
+                generated_at = excluded.generated_at
+            """,
+            (
+                lead.lead_id,
+                lead.source,
+                lead.business_name,
+                json.dumps(lead.contact_info),
+                lead.niche,
+                lead.city,
+                lead.generated_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_lead(lead_id: str) -> LeadGenResult | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM lead_gen_results WHERE lead_id = ?",
+            (lead_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_lead(row)
+
+
+async def list_leads(niche: str | None = None, city: str | None = None) -> list[LeadGenResult]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT * FROM lead_gen_results WHERE 1=1"
+        params = []
+        if niche:
+            query += " AND niche = ?"
+            params.append(niche)
+        if city:
+            query += " AND city = ?"
+            params.append(city)
+        query += " ORDER BY generated_at DESC"
+        cursor = await db.execute(query, tuple(params))
+        rows = await cursor.fetchall()
+        return [_row_to_lead(row) for row in rows]
+
+
+def _row_to_partnership(row: aiosqlite.Row) -> PartnershipEvaluation:
+    import json
+    return PartnershipEvaluation.model_validate(
+        {
+            "partnership_id": row["partnership_id"],
+            "partner_name": row["partner_name"],
+            "partner_type": row["partner_type"],
+            "criteria_scores": json.loads(row["criteria_scores_json"]),
+            "total_score": row["total_score"],
+            "status": row["status"],
+            "evaluated_at": row["evaluated_at"],
+        }
+    )
+
+
+async def save_partnership(partnership: PartnershipEvaluation) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO partnership_evaluations (
+                partnership_id, partner_name, partner_type, criteria_scores_json,
+                total_score, status, evaluated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(partnership_id) DO UPDATE SET
+                partner_name = excluded.partner_name,
+                partner_type = excluded.partner_type,
+                criteria_scores_json = excluded.criteria_scores_json,
+                total_score = excluded.total_score,
+                status = excluded.status,
+                evaluated_at = excluded.evaluated_at
+            """,
+            (
+                partnership.partnership_id,
+                partnership.partner_name,
+                partnership.partner_type.value,
+                json.dumps(partnership.criteria_scores),
+                partnership.total_score,
+                partnership.status.value,
+                partnership.evaluated_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_partnership(partnership_id: str) -> PartnershipEvaluation | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM partnership_evaluations WHERE partnership_id = ?",
+            (partnership_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_partnership(row)
+
+
+async def get_partnerships_recommended() -> list[PartnershipEvaluation]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM partnership_evaluations WHERE status = 'RECOMMENDED' ORDER BY evaluated_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_partnership(row) for row in rows]
+
+
+async def list_partnerships() -> list[PartnershipEvaluation]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM partnership_evaluations ORDER BY evaluated_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_partnership(row) for row in rows]

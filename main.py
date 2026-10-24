@@ -25,6 +25,16 @@ from agents.customer_success import (
     compute_health_score,
     check_client_health_all,
 )
+from agents.marketing_growth import (
+    plan_campaign,
+    create_positioning,
+    define_icp,
+    create_battlecard,
+    design_ab_test,
+    analyze_ab_test,
+    generate_leads_etis,
+    evaluate_partnership,
+)
 from agents.contract_generator import generate_contract, send_contract, mark_contract_signed
 from agents.sop_pricing import evaluate_pricing_change, process_pricing_change
 from agents.sop_feature_request import evaluate_feature_request
@@ -61,14 +71,6 @@ from database import (
     get_contracts_nearing_expiry,
     get_expired_contracts,
     get_active_client_projects,
-    get_backup,
-    get_latest_backup,
-    save_backup,
-    get_incident,
-    get_open_incidents,
-    get_incidents_by_type_open,
-    save_incident,
-    save_drill,
     init_db,
     list_pending_approvals,
     save_approval,
@@ -100,6 +102,28 @@ from database import (
     get_client_health,
     list_client_health,
     get_active_client_projects,
+    get_backup,
+    get_latest_backup,
+    save_backup,
+    get_incident,
+    get_open_incidents,
+    get_incidents_by_type_open,
+    save_incident,
+    save_drill,
+    save_campaign,
+    get_campaign,
+    list_campaigns,
+    save_campaign_kpi,
+    get_battlecards,
+    save_battlecard,
+    save_ab_test,
+    get_ab_test,
+    save_lead,
+    list_leads,
+    save_partnership,
+    get_partnership,
+    list_partnerships,
+    get_partnerships_recommended,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -149,21 +173,20 @@ from models import (
     IncidentStatus,
     DrillResult,
     DrillStatus,
-    TaskKind,
-    TaskStatus,
-    TechnicalDecision,
-    DecisionType,
-    DecisionStatus,
-    FeatureRequest,
-    FeatureRequestStatus,
+    Campaign,
+    CampaignObjective,
+    CampaignStatus,
+    CampaignKPI,
+    ICPDefinition,
+    CompetitiveBattlecard,
+    ABTest,
+    ABTestStatus,
+    LeadGenResult,
+    PartnershipEvaluation,
+    PartnerType,
+    PartnershipStatus,
     AgentPerformance,
-    Contract,
     ContractType,
-    ContractStatus,
-    ClientHealth,
-    SupportTicket,
-    TicketCategory,
-    TicketStatus,
 )
 
 
@@ -1012,4 +1035,121 @@ async def ops_resolve_incident(incident_id: str) -> dict:
 async def ops_watchdog_tick() -> dict:
     incidents = await watchdog_check()
     return {"incidents_found": len(incidents), "incidents": [i.model_dump() for i in incidents]}
+
+
+# Marketing / Growth Endpoints
+@app.post("/api/marketing/campaigns")
+async def marketing_create_campaign(
+    name: str,
+    objective: CampaignObjective,
+    target_audience: str,
+    channels: list[str],
+) -> dict:
+    campaign = await plan_campaign(name, objective, target_audience, channels)
+    return campaign.model_dump()
+
+
+@app.get("/api/marketing/campaigns")
+async def marketing_list_campaigns() -> list[dict]:
+    campaigns = await list_campaigns()
+    return [c.model_dump() for c in campaigns]
+
+
+@app.post("/api/marketing/positioning")
+async def marketing_create_positioning(
+    target_audience: str,
+    alternatives: list[str],
+    unique_attributes: list[str],
+) -> dict:
+    return await create_positioning(target_audience, alternatives, unique_attributes)
+
+
+@app.post("/api/marketing/icp")
+async def marketing_define_icp(
+    business_type: str,
+    firmographics: dict,
+    technographics: dict,
+    psychographics: dict,
+    buyer_personas: list[str],
+) -> dict:
+    icp = await define_icp(business_type, firmographics, technographics, psychographics, buyer_personas)
+    return icp.model_dump()
+
+
+@app.post("/api/marketing/battlecards")
+async def marketing_create_battlecard(
+    competitor_name: str,
+    strengths: list[str],
+    weaknesses: list[str],
+    our_advantages: list[str],
+    when_to_win: list[str],
+    when_to_lose: list[str],
+    talk_tracks: list[str],
+) -> dict:
+    battlecard = await create_battlecard(
+        competitor_name, strengths, weaknesses, our_advantages,
+        when_to_win, when_to_lose, talk_tracks
+    )
+    return battlecard.model_dump()
+
+
+@app.get("/api/marketing/battlecards")
+async def marketing_list_battlecards() -> list[dict]:
+    battlecards = await get_battlecards()
+    return [b.model_dump() for b in battlecards]
+
+
+@app.post("/api/marketing/ab-tests")
+async def marketing_design_ab_test(
+    campaign_id: str,
+    variant_a: str,
+    variant_b: str,
+    metric: str,
+    sample_size_a: int,
+    sample_size_b: int,
+) -> dict:
+    test = await design_ab_test(campaign_id, variant_a, variant_b, metric, sample_size_a, sample_size_b)
+    return test.model_dump()
+
+
+@app.post("/api/marketing/ab-tests/{test_id}/analyze")
+async def marketing_analyze_ab_test(test_id: str) -> dict:
+    test = await analyze_ab_test(test_id)
+    return test.model_dump()
+
+
+@app.post("/api/marketing/leads")
+async def marketing_generate_leads(niche: str, city: str, limit: int = 10) -> list[dict]:
+    leads = await generate_leads_etis(niche, city, limit)
+    return [l.model_dump() for l in leads]
+
+
+@app.get("/api/marketing/leads")
+async def marketing_list_leads(niche: str | None = None, city: str | None = None) -> list[dict]:
+    leads = await list_leads(niche=niche, city=city)
+    return [l.model_dump() for l in leads]
+
+
+@app.post("/api/marketing/partnerships")
+async def marketing_evaluate_partnership(
+    partner_name: str,
+    partner_type: PartnerType,
+    cost_score: int,
+    reliability_score: int,
+    support_score: int,
+    integration_score: int,
+) -> dict:
+    evaluation = await evaluate_partnership(
+        partner_name, partner_type, cost_score, reliability_score, support_score, integration_score
+    )
+    return evaluation.model_dump()
+
+
+@app.get("/api/marketing/partnerships")
+async def marketing_list_partnerships(status: str | None = None) -> list[dict]:
+    if status == "RECOMMENDED":
+        partnerships = await get_partnerships_recommended()
+    else:
+        partnerships = await list_partnerships()
+    return [p.model_dump() for p in partnerships]
 

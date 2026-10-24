@@ -310,6 +310,7 @@ class MemoryCategory(str, Enum):
     FINANCE_MARGIN_LEAK = "FINANCE_MARGIN_LEAK"
     CLIENT_CHURN_REASON = "CLIENT_CHURN_REASON"
     OPS_INCIDENT = "OPS_INCIDENT"
+    RED_TEAM_FINDING = "RED_TEAM_FINDING"
 
 
 class MemorySeverity(str, Enum):
@@ -719,4 +720,72 @@ class AuditLog(BaseModel):
     result: AuditResult
     context: dict
     timestamp: str
+
+
+# ==================== WAVE 20: RED TEAM (SI MERAH) ====================
+
+class AttackScenario(str, Enum):
+    ADVERSARIAL_TEXT = "ADVERSARIAL_TEXT"
+    APPROVAL_REPLAY = "APPROVAL_REPLAY"
+    PAYMENT_REPLAY = "PAYMENT_REPLAY"
+    RATE_LIMIT_BYPASS = "RATE_LIMIT_BYPASS"
+    PII_LEAK = "PII_LEAK"
+    STATE_MACHINE_JUMP = "STATE_MACHINE_JUMP"
+    FOUNDER_LOCK_BYPASS = "FOUNDER_LOCK_BYPASS"
+    BACKUP_CORRUPTION = "BACKUP_CORRUPTION"
+    TOKEN_EXHAUSTION = "TOKEN_EXHAUSTION"
+    SOCIAL_ENGINEERING = "SOCIAL_ENGINEERING"
+
+
+class AttackStatus(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    SKIPPED = "SKIPPED"
+
+
+class AttackSeverity(str, Enum):
+    CRITICAL = "CRITICAL"
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    INFO = "INFO"
+
+
+class AttackResult(BaseModel):
+    result_id: str
+    drill_id: str
+    scenario: AttackScenario
+    status: AttackStatus
+    severity: AttackSeverity
+    vector: str
+    expected: str
+    actual: str
+    remediation_agent: str
+    remediation_task: str
+    executed_at: str
+
+
+class DrillTrigger(str, Enum):
+    SCHEDULED = "SCHEDULED"
+    MANUAL = "MANUAL"
+
+
+class RedTeamDrillStatus(str, Enum):
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    ABORTED = "ABORTED"
+
+
+class RedTeamDrill(BaseModel):
+    drill_id: str
+    triggered_by: DrillTrigger
+    status: RedTeamDrillStatus
+    started_at: str
+    finished_at: str | None = None
+    results: list[AttackResult] = []
+    summary: str = ""
+
+
+# Add RED_TEAM_FINDING to MemoryCategory
+# (MemoryCategory already exists above, we'll extend it by adding the new value)
 

@@ -573,3 +573,110 @@ class DrillResult(BaseModel):
     status: DrillStatus
     notes: str
 
+
+class CampaignObjective(str, Enum):
+    LEAD_GEN = "LEAD_GEN"
+    BRAND_AWARENESS = "BRAND_AWARENESS"
+    RETENTION = "RETENTION"
+
+
+class CampaignStatus(str, Enum):
+    PLANNING = "PLANNING"
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+
+
+class Campaign(BaseModel):
+    campaign_id: str
+    name: str
+    objective: CampaignObjective
+    target_audience: str
+    channel_mix: list[str]
+    status: CampaignStatus = CampaignStatus.PLANNING
+    created_at: str
+    completed_at: str | None = None
+
+
+class CampaignKPI(BaseModel):
+    kpi_id: str
+    campaign_id: str
+    metric_name: str
+    target_value: float
+    actual_value: float
+    measured_at: str
+
+
+class ICPDefinition(BaseModel):
+    icp_id: str
+    business_type: str
+    firmographics: dict
+    technographics: dict
+    psychographics: dict
+    buyer_personas: list[str]
+    created_at: str
+
+
+class CompetitiveBattlecard(BaseModel):
+    battlecard_id: str
+    competitor_name: str
+    strengths: list[str]
+    weaknesses: list[str]
+    our_advantages: list[str]
+    when_to_win: list[str]
+    when_to_lose: list[str]
+    talk_tracks: list[str]
+    created_at: str
+    updated_at: str
+
+
+class ABTestStatus(str, Enum):
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+
+
+class ABTest(BaseModel):
+    test_id: str
+    campaign_id: str
+    variant_a: str
+    variant_b: str
+    metric: str
+    sample_size_a: int
+    sample_size_b: int
+    conversion_a: float = 0.0
+    conversion_b: float = 0.0
+    winner: str | None = None
+    status: ABTestStatus = ABTestStatus.RUNNING
+    created_at: str
+
+
+class LeadGenResult(BaseModel):
+    lead_id: str
+    source: str
+    business_name: str
+    contact_info: dict
+    niche: str
+    city: str
+    generated_at: str
+
+
+class PartnerType(str, Enum):
+    PAYMENT_GATEWAY = "PAYMENT_GATEWAY"
+    HOSTING = "HOSTING"
+    AGENCY = "AGENCY"
+
+
+class PartnershipStatus(str, Enum):
+    EVALUATING = "EVALUATING"
+    RECOMMENDED = "RECOMMENDED"
+    REJECTED = "REJECTED"
+
+
+class PartnershipEvaluation(BaseModel):
+    partnership_id: str
+    partner_name: str
+    partner_type: PartnerType
+    criteria_scores: dict
+    total_score: int
+    status: PartnershipStatus = PartnershipStatus.EVALUATING
+    evaluated_at: str
+

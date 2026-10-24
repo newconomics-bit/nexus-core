@@ -28,6 +28,12 @@ from agents.disaster_recovery import (
     run_backup, verify_backup, watchdog_check, mitigate_incident, resolve_incident,
     run_dr_drill, _create_incident as dr_create_incident
 )
+from agents.marketing_growth import (
+    plan_campaign, create_positioning, define_icp, create_battlecard,
+    design_ab_test, analyze_ab_test, generate_leads_etis, evaluate_partnership
+)
+from database import get_campaign, get_battlecards, get_ab_test, list_leads, list_partnerships
+from models import AgentPerformance, DecisionType, ContractType, ContractStatus, OnboardingItemStatus, TicketCategory, TicketStatus, Incident, BackupStatus, DrillStatus, IncidentSeverity, IncidentType, IncidentStatus, Campaign, CampaignObjective, CampaignStatus, CampaignKPI, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus, Campaign
 
 
 API_KEY = "dev-secret-key-change-in-production"
@@ -2912,6 +2918,256 @@ def test_drill_no_backup_handled_gracefully(client):
 
 def test_no_external_tools_installed_wave17():
     """Test HARD RULES no.5: no external tools packages installed (Wave 17)."""
+    with open("requirements.txt") as f:
+        reqs = f.read().lower()
+    
+    forbidden = [
+        "impeccable", "better-icons", "hallmark", "taste-skill", "stop-slop",
+        "humanizer", "open-design", "mailcheap", "helpin", "inbox-zero",
+        "office-kw", "figcraft", "n8n", "zendesk", "hubspot", "vapi", "apollo"
+    ]
+    for pkg in forbidden:
+        assert pkg not in reqs, f"Forbidden package {pkg} found in requirements.txt"
+    
+    import os
+    if os.path.exists("package.json"):
+        with open("package.json") as f:
+            pkg_json = f.read().lower()
+        for pkg in forbidden:
+            assert pkg not in pkg_json, f"Forbidden package {pkg} found in package.json"
+
+
+# ==================== WAVE 18 TESTS ====================
+
+def test_plan_campaign_creates_campaign_with_kpis(client):
+    """Test plan_campaign -> Campaign record + KPI targets."""
+    campaign = asyncio.run(plan_campaign(
+        name="Q1 Lead Gen",
+        objective=CampaignObjective.LEAD_GEN,
+        target_audience="UMKM Retail",
+        channels=["Meta Ads", "Google Ads", "Email"],
+    ))
+    assert campaign.campaign_id
+    assert campaign.name == "Q1 Lead Gen"
+    assert campaign.objective == CampaignObjective.LEAD_GEN
+    assert campaign.status == CampaignStatus.PLANNING
+    assert campaign.channel_mix == ["Meta Ads", "Google Ads", "Email"]
+
+
+def test_create_positioning_returns_april_dunford_output(client):
+    """Test create_positioning -> dict with value_prop, best_fit_customers, market_category, trends."""
+    result = asyncio.run(create_positioning(
+        target_audience="UMKM Retail",
+        alternatives=["BukuWarung", "MokaPOS", "KasirAja"],
+        unique_attributes=["QRIS terintegrasi", "Akuntansi otomatis", "Multi-cabang"],
+    ))
+    assert "value_prop" in result
+    assert "best_fit_customers" in result
+    assert "market_category" in result
+    assert "trends" in result
+    assert "UMKM Retail" in result["best_fit_customers"]
+    assert len(result["trends"]) >= 1
+
+
+def test_define_icp_creates_icp_record(client):
+    """Test define_icp -> ICPDefinition record."""
+    icp = asyncio.run(define_icp(
+        business_type="Retail",
+        firmographics={"size": "10-50 karyawan", "revenue": "1-5M/bulan"},
+        technographics={"pos": "manual", "payment": "cash"},
+        psychographics={"pain_points": ["manual bookkeeping", "slow checkout"]},
+        buyer_personas=["Ibu Toko", "Pak Warung"],
+    ))
+    assert icp.icp_id
+    assert icp.business_type == "Retail"
+    assert icp.firmographics["size"] == "10-50 karyawan"
+    assert "Ibu Toko" in icp.buyer_personas
+
+
+def test_create_battlecard_creates_record(client):
+    """Test create_battlecard -> CompetitiveBattlecard record."""
+    battlecard = asyncio.run(create_battlecard(
+        competitor_name="BukuWarung",
+        strengths=["Brand awareness", "Large user base"],
+        weaknesses=["No QRIS integration", "Manual accounting"],
+        our_advantages=["QRIS native", "Auto accounting", "Multi-branch"],
+        when_to_win=["Client needs QRIS", "Client needs auto accounting"],
+        when_to_lose=["Client wants cheapest", "Client wants simplest"],
+        talk_tracks=["Focus on QRIS integration", "Show auto accounting demo"],
+    ))
+    assert battlecard.battlecard_id
+    assert battlecard.competitor_name == "BukuWarung"
+    assert "QRIS native" in battlecard.our_advantages
+
+
+def test_design_ab_test_creates_record(client):
+    """Test design_ab_test -> ABTest record."""
+    # First create a campaign
+    campaign = asyncio.run(plan_campaign(
+        name="Test Campaign",
+        objective=CampaignObjective.LEAD_GEN,
+        target_audience="UMKM",
+        channels=["Meta Ads"],
+    ))
+    
+    test = asyncio.run(design_ab_test(
+        campaign_id=campaign.campaign_id,
+        variant_a="Headline: Hemat 2 Jam",
+        variant_b="Headline: Otomatisasi Kasir",
+        metric="CTR",
+        sample_size_a=1000,
+        sample_size_b=1000,
+    ))
+    assert test.test_id
+    assert test.campaign_id == campaign.campaign_id
+    assert test.variant_a == "Headline: Hemat 2 Jam"
+    assert test.variant_b == "Headline: Otomatisasi Kasir"
+    assert test.metric == "CTR"
+    assert test.status == ABTestStatus.RUNNING
+
+
+def test_analyze_ab_test_winner_a(client):
+    """Test analyze_ab_test: conversion_a=20%, conversion_b=10% -> winner=A."""
+    campaign = asyncio.run(plan_campaign(
+        name="Test Campaign",
+        objective=CampaignObjective.LEAD_GEN,
+        target_audience="UMKM",
+        channels=["Meta Ads"],
+    ))
+    test = asyncio.run(design_ab_test(
+        campaign_id=campaign.campaign_id,
+        variant_a="A",
+        variant_b="B",
+        metric="Conversion Rate",
+        sample_size_a=1000,
+        sample_size_b=1000,
+    ))
+    # Set conversion data: A=200/1000 (20%), B=100/1000 (10%)
+    from database import save_ab_test
+    test.conversion_a = 200.0
+    test.conversion_b = 100.0
+    asyncio.run(save_ab_test(test))
+    
+    analyzed = asyncio.run(analyze_ab_test(test.test_id))
+    assert analyzed.winner == "A"
+    assert analyzed.status == ABTestStatus.COMPLETED
+
+
+def test_analyze_ab_test_winner_b(client):
+    """Test analyze_ab_test: conversion_a=15%, conversion_b=22% -> winner=B."""
+    campaign = asyncio.run(plan_campaign(
+        name="Test Campaign 2",
+        objective=CampaignObjective.LEAD_GEN,
+        target_audience="UMKM",
+        channels=["Meta Ads"],
+    ))
+    test = asyncio.run(design_ab_test(
+        campaign_id=campaign.campaign_id,
+        variant_a="A",
+        variant_b="B",
+        metric="Conversion Rate",
+        sample_size_a=1000,
+        sample_size_b=1000,
+    ))
+    from database import save_ab_test
+    test.conversion_a = 150.0  # 15%
+    test.conversion_b = 220.0  # 22%
+    asyncio.run(save_ab_test(test))
+    
+    analyzed = asyncio.run(analyze_ab_test(test.test_id))
+    assert analyzed.winner == "B"
+    assert analyzed.status == ABTestStatus.COMPLETED
+
+
+def test_analyze_ab_test_tie(client):
+    """Test analyze_ab_test: conversion_a=12%, conversion_b=11% -> winner=TIE (diff < 5%)."""
+    campaign = asyncio.run(plan_campaign(
+        name="Test Campaign 3",
+        objective=CampaignObjective.LEAD_GEN,
+        target_audience="UMKM",
+        channels=["Meta Ads"],
+    ))
+    test = asyncio.run(design_ab_test(
+        campaign_id=campaign.campaign_id,
+        variant_a="A",
+        variant_b="B",
+        metric="Conversion Rate",
+        sample_size_a=1000,
+        sample_size_b=1000,
+    ))
+    from database import save_ab_test
+    test.conversion_a = 120.0  # 12%
+    test.conversion_b = 110.0  # 11%
+    asyncio.run(save_ab_test(test))
+    
+    analyzed = asyncio.run(analyze_ab_test(test.test_id))
+    assert analyzed.winner == "TIE"
+    assert analyzed.status == ABTestStatus.COMPLETED
+
+
+def test_generate_leads_etis_returns_mock_leads(client):
+    """Test generate_leads_etis -> list LeadGenResult (mock data)."""
+    leads = asyncio.run(generate_leads_etis(niche="Retail", city="Jakarta", limit=3))
+    assert len(leads) == 3
+    for lead in leads:
+        assert lead.lead_id
+        assert lead.source == "mock_api_resmi"
+        assert lead.niche == "Retail"
+        assert lead.city == "Jakarta"
+        assert "phone" in lead.contact_info
+        assert "email" in lead.contact_info
+
+
+def test_evaluate_partnership_recommended(client):
+    """Test evaluate_partnership: scores (80, 75, 85, 70) -> total=77.5 -> RECOMMENDED."""
+    evaluation = asyncio.run(evaluate_partnership(
+        partner_name="Midtrans",
+        partner_type=PartnerType.PAYMENT_GATEWAY,
+        cost_score=80,
+        reliability_score=75,
+        support_score=85,
+        integration_score=70,
+    ))
+    assert evaluation.partnership_id
+    assert evaluation.partner_name == "Midtrans"
+    assert evaluation.partner_type == PartnerType.PAYMENT_GATEWAY
+    assert evaluation.criteria_scores["cost"] == 80
+    assert evaluation.total_score == 77  # (80+75+85+70)//4 = 77
+    assert evaluation.status == PartnershipStatus.RECOMMENDED
+
+
+def test_evaluate_partnership_rejected(client):
+    """Test evaluate_partnership: scores (60, 50, 65, 55) -> total=57.5 -> REJECTED."""
+    evaluation = asyncio.run(evaluate_partnership(
+        partner_name="Bad Partner",
+        partner_type=PartnerType.HOSTING,
+        cost_score=60,
+        reliability_score=50,
+        support_score=65,
+        integration_score=55,
+    ))
+    assert evaluation.total_score == 57  # (60+50+65+55)//4 = 57
+    assert evaluation.status == PartnershipStatus.REJECTED
+
+
+def test_evaluate_partnership_negative_score_error(client):
+    """Test evaluate_partnership with negative score -> error handled (400)."""
+    try:
+        asyncio.run(evaluate_partnership(
+            partner_name="Bad Partner",
+            partner_type=PartnerType.HOSTING,
+            cost_score=-10,
+            reliability_score=50,
+            support_score=50,
+            integration_score=50,
+        ))
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "must be between 0 and 100" in str(e)
+
+
+def test_no_external_tools_installed_wave18():
+    """Test HARD RULES no.5: no external tools packages installed (Wave 18)."""
     with open("requirements.txt") as f:
         reqs = f.read().lower()
     

@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Literal
+import time
 
 from database import (
     get_invoice,
@@ -18,8 +19,30 @@ from agents.text_quality_gate import enforce
 from core.pii_masker import mask_pii_in_text
 from models import Invoice, InvoiceStatus, ProjectState, Subscription, SubscriptionStatus
 
-
 DEFAULT_MONTHLY_FEE = 150_000
+
+# Simple in-memory lock for dunning idempotency (single-process deployment)
+_dunning_locks: dict[str, float] = {}  # invoice_id -> lock expiry timestamp
+_DUNNING_LOCK_TTL = 300  # 5 minutes
+
+
+def _acquire_dunning_lock(invoice_id: str) -> bool:
+    """Try to acquire a lock for processing this invoice. Returns True if acquired."""
+    now = time.time()
+    # Clean expired locks
+    expired = [k for k, v in _dunning_locks.items() if v < now]
+    for k in expired:
+        del _dunning_locks[k]
+    
+    if invoice_id in _dunning_locks:
+        return False
+    _dunning_locks[invoice_id] = now + _DUNNING_LOCK_TTL
+    return True
+
+
+def _release_dunning_lock(invoice_id: str) -> None:
+    """Release the dunning lock for this invoice."""
+    _dunning_locks.pop(invoice_id, None)
 
 
 def _enforce_text_quality(message: str) -> str:
@@ -78,8 +101,6 @@ async def activate_subscription(project_id: str, monthly_fee: int = DEFAULT_MONT
 
     await update_project_state(project_id, ProjectState.SUBSCRIPTION.value)
 
-    await run_post_mortem(project_id)
-
     # Generate onboarding plan for Dewi
     await generate_onboarding(project_id)
 
@@ -121,67 +142,75 @@ async def run_dunning_sop() -> list[dict]:
     actions = []
 
     for invoice in overdue_invoices:
-        due_dt = datetime.fromisoformat(invoice.due_date.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        days_overdue = (now - due_dt).days
+        # Idempotency: try to acquire lock for this invoice
+        if not _acquire_dunning_lock(invoice.invoice_id):
+            continue  # Another run is processing this invoice
+        
+        try:
+            due_dt = datetime.fromisoformat(invoice.due_date.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            days_overdue = (now - due_dt).days
 
-        project = await get_project(invoice.project_id)
-        if not project:
-            continue
+            project = await get_project(invoice.project_id)
+            if not project:
+                continue
 
-        if days_overdue >= 30 and project["state"] != ProjectState.CHURNED.value:
-            await update_project_state(invoice.project_id, ProjectState.CHURNED.value)
-            invoice.status = InvoiceStatus.CANCELLED
-            await save_invoice(invoice)
-            subscription = await get_subscription(invoice.project_id)
-            if subscription:
-                subscription.status = SubscriptionStatus.CHURNED
-                await save_subscription(subscription)
-            message = _enforce_text_quality("Bang, invoice hosting sudah telat 30 hari. Server kita hapus ya. Kalau mau lanjut, chat kami.")
-            action_data = mask_for_logging({
-                "invoice_id": invoice.invoice_id,
-                "project_id": invoice.project_id,
-                "days_overdue": days_overdue,
-                "action": "CHURNED",
-                "message": message,
-            })
-            actions.append(action_data)
+            if days_overdue >= 30 and project["state"] != ProjectState.CHURNED.value:
+                await update_project_state(invoice.project_id, ProjectState.CHURNED.value)
+                invoice.status = InvoiceStatus.CANCELLED
+                await save_invoice(invoice)
+                subscription = await get_subscription(invoice.project_id)
+                if subscription:
+                    subscription.status = SubscriptionStatus.CHURNED
+                    await save_subscription(subscription)
+                message = _enforce_text_quality("Bang, invoice hosting sudah telat 30 hari. Server kita hapus ya. Kalau mau lanjut, chat kami.")
+                action_data = mask_for_logging({
+                    "invoice_id": invoice.invoice_id,
+                    "project_id": invoice.project_id,
+                    "days_overdue": days_overdue,
+                    "action": "CHURNED",
+                    "message": message,
+                })
+                actions.append(action_data)
 
-            await run_post_mortem(invoice.project_id)
-        elif days_overdue >= 14 and project["state"] == ProjectState.SUBSCRIPTION.value:
-            message = _enforce_text_quality("Bang, tagihan sudah 14 hari lewat. Mau kita tawarin diskon atau downgrade paketnya?")
-            action_data = mask_for_logging({
-                "invoice_id": invoice.invoice_id,
-                "project_id": invoice.project_id,
-                "days_overdue": days_overdue,
-                "action": "RETENTION_OFFER",
-                "message": message,
-            })
-            actions.append(action_data)
-        elif days_overdue >= 7 and project["state"] == ProjectState.SUBSCRIPTION.value:
-            await update_project_state(invoice.project_id, ProjectState.SUSPENDED.value)
-            subscription = await get_subscription(invoice.project_id)
-            if subscription:
-                subscription.status = SubscriptionStatus.SUSPENDED
-                await save_subscription(subscription)
-            message = _enforce_text_quality("Bang, website sudah disuspend karena tagihan telat 7 hari. Bayar dulu baru aktif lagi.")
-            action_data = mask_for_logging({
-                "invoice_id": invoice.invoice_id,
-                "project_id": invoice.project_id,
-                "days_overdue": days_overdue,
-                "action": "SUSPENDED",
-                "message": message,
-            })
-            actions.append(action_data)
-        elif days_overdue >= 3 and project["state"] == ProjectState.SUBSCRIPTION.value:
-            message = _enforce_text_quality("Bang, invoice hosting telat 3 hari nih. Ada kendala di pembayaran atau mau saya kirim ulang QRIS-nya?")
-            action_data = mask_for_logging({
-                "invoice_id": invoice.invoice_id,
-                "project_id": invoice.project_id,
-                "days_overdue": days_overdue,
-                "action": "REMINDER_SENT",
-                "message": message,
-            })
-            actions.append(action_data)
+                await run_post_mortem(invoice.project_id)
+            elif days_overdue >= 14 and project["state"] == ProjectState.SUBSCRIPTION.value:
+                message = _enforce_text_quality("Bang, tagihan sudah 14 hari lewat. Mau kita tawarin diskon atau downgrade paketnya?")
+                action_data = mask_for_logging({
+                    "invoice_id": invoice.invoice_id,
+                    "project_id": invoice.project_id,
+                    "days_overdue": days_overdue,
+                    "action": "RETENTION_OFFER",
+                    "message": message,
+                })
+                actions.append(action_data)
+            elif days_overdue >= 7 and project["state"] == ProjectState.SUBSCRIPTION.value:
+                await update_project_state(invoice.project_id, ProjectState.SUSPENDED.value)
+                subscription = await get_subscription(invoice.project_id)
+                if subscription:
+                    subscription.status = SubscriptionStatus.SUSPENDED
+                    await save_subscription(subscription)
+                message = _enforce_text_quality("Bang, website sudah disuspend karena tagihan telat 7 hari. Bayar dulu baru aktif lagi.")
+                action_data = mask_for_logging({
+                    "invoice_id": invoice.invoice_id,
+                    "project_id": invoice.project_id,
+                    "days_overdue": days_overdue,
+                    "action": "SUSPENDED",
+                    "message": message,
+                })
+                actions.append(action_data)
+            elif days_overdue >= 3 and project["state"] == ProjectState.SUBSCRIPTION.value:
+                message = _enforce_text_quality("Bang, invoice hosting telat 3 hari nih. Ada kendala di pembayaran atau mau saya kirim ulang QRIS-nya?")
+                action_data = mask_for_logging({
+                    "invoice_id": invoice.invoice_id,
+                    "project_id": invoice.project_id,
+                    "days_overdue": days_overdue,
+                    "action": "REMINDER_SENT",
+                    "message": message,
+                })
+                actions.append(action_data)
+
+        finally:
+            _release_dunning_lock(invoice.invoice_id)
 
     return actions

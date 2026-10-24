@@ -13,6 +13,33 @@ _ANTI_SLOP_PATH = Path(__file__).resolve().parents[1] / "ANTI_SLOP_RULES.md"
 ANTI_SLOP_RULES = _ANTI_SLOP_PATH.read_text(encoding="utf-8")
 _JSON_FENCE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
+# Prompt injection protection patterns
+_INJECTION_PATTERNS = [
+    r"(?i)ignore\s+(previous|all)\s+instructions?",
+    r"(?i)forget\s+(everything|previous|above)",
+    r"(?i)system\s+prompt",
+    r"(?i)you\s+are\s+now",
+    r"(?i)pretend\s+to\s+be",
+    r"(?i)roleplay\s+as",
+    r"(?i)output\s+(the\s+)?(system\s+)?prompt",
+    r"(?i)show\s+me\s+(the\s+)?(api\s+)?keys?",
+    r"(?i)reveal\s+(secrets?|passwords?)",
+    r"(?i)bypass\s+(security|auth)",
+    r"(?i)admin\s+mode",
+    r"(?i)developer\s+mode",
+]
+_INJECTION_REGEX = re.compile("|".join(_INJECTION_PATTERNS))
+
+
+def _detect_prompt_injection(text: str) -> bool:
+    """Detect potential prompt injection attempts in client messages."""
+    if _INJECTION_REGEX.search(text):
+        return True
+    # Also check for excessive length (potential context stuffing)
+    if len(text) > 5000:
+        return True
+    return False
+
 
 def build_system_prompt() -> str:
     return (
@@ -57,6 +84,12 @@ def _enforce_text_quality(reply: str) -> str:
 
 
 async def run_discovery(project_id: str, client_message: str, db_session) -> dict:
+    # Prompt injection protection
+    if _detect_prompt_injection(client_message):
+        # Log the attempt but don't reveal detection to attacker
+        safe_reply = "Halo Bang, pesan tidak bisa diproses. Coba kirim ulang dengan bahasa yang biasa ya."
+        return {"status": "NEED_MORE_INFO", "reply": safe_reply}
+    
     reply = await call_llm(SARI_MODEL, build_system_prompt(), client_message)
     # Apply text quality gate before sending to client
     clean_reply = _enforce_text_quality(reply)

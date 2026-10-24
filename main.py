@@ -48,6 +48,30 @@ from agents.finance_costing import (
     apply_discount,
     calculate_quote,
     estimate_effort,
+
+# In-memory lock for state transitions (single-process deployment)
+_state_transition_locks: dict[str, float] = {}
+_STATE_TRANSITION_LOCK_TTL = 30  # seconds
+
+
+def _acquire_state_lock(project_id: str) -> bool:
+    """Try to acquire a lock for state transition. Returns True if acquired."""
+    import time
+    now = time.time()
+    # Clean expired locks
+    expired = [k for k, v in _state_transition_locks.items() if v < now]
+    for k in expired:
+        del _state_transition_locks[k]
+    
+    if project_id in _state_transition_locks:
+        return False
+    _state_transition_locks[project_id] = now + _STATE_TRANSITION_LOCK_TTL
+    return True
+
+
+def _release_state_lock(project_id: str) -> None:
+    """Release the state transition lock for this project."""
+    _state_transition_locks.pop(project_id, None)
 )
 from agents.payment_verification import generate_qris, handle_qris_webhook, VerificationResult
 from agents.post_mortem import run_post_mortem
@@ -245,19 +269,29 @@ async def start_project(body: StartProjectRequest) -> dict:
 
 @app.post("/api/project/{project_id}/advance")
 async def advance_project(project_id: str, body: AdvanceStateRequest) -> dict:
-    project = await get_project(project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    current = ProjectState(project["state"])
-    if body.new_state not in ALLOWED_TRANSITIONS[current]:
+    # Acquire lock to prevent race conditions on state transitions
+    if not _acquire_state_lock(project_id):
         raise HTTPException(
-            status_code=400,
-            detail=f"Invalid transition {current.value} -> {body.new_state.value}",
+            status_code=409,
+            detail="State transition already in progress for this project. Please retry.",
         )
+    
+    try:
+        project = await get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    await update_project_state(project_id, body.new_state.value)
-    return {"project_id": project_id, "state": body.new_state.value}
+        current = ProjectState(project["state"])
+        if body.new_state not in ALLOWED_TRANSITIONS[current]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid transition {current.value} -> {body.new_state.value}",
+            )
+
+        await update_project_state(project_id, body.new_state.value)
+        return {"project_id": project_id, "state": body.new_state.value}
+    finally:
+        _release_state_lock(project_id)
 
 
 @app.post("/api/project/{project_id}/chat")

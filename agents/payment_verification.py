@@ -53,10 +53,31 @@ async def handle_qris_webhook(
     qris_id: str,
     amount: int,
 ) -> tuple[VerificationResult, str]:
-    ledger_entry = await get_ledger_by_reference(reference_code)
-    if ledger_entry:
-        return VerificationResult.DUPLICATE, "Reference code already processed"
-
+    # Atomic upsert to prevent TOCTOU: try to insert ledger entry with unique reference_code
+    # If duplicate, the UNIQUE constraint on reference_code will reject it
+    from database import save_ledger_entry
+    from models import MockLedgerEntry
+    
+    now = datetime.now(timezone.utc)
+    entry = MockLedgerEntry(
+        entry_id=str(uuid.uuid4()),
+        reference_code=reference_code,
+        qris_id=qris_id,
+        amount=amount,
+        paid_at=now.isoformat(),
+    )
+    
+    # Try to save ledger entry - will fail if reference_code already exists (UNIQUE constraint)
+    try:
+        await save_ledger_entry(entry)
+    except Exception as e:
+        # Check if it's a duplicate reference_code error (SQLite UNIQUE constraint violation)
+        if "UNIQUE constraint failed" in str(e) or "reference_code" in str(e):
+            return VerificationResult.DUPLICATE, "Reference code already processed"
+        # Re-raise other errors
+        raise
+    
+    # If we reach here, ledger entry was created successfully - now verify the payment
     qris = await get_qris(qris_id)
     if not qris or qris.status != QrisStatus.ACTIVE:
         return VerificationResult.INVALID_QRIS, "QRIS not found or not active"
@@ -85,8 +106,6 @@ async def handle_qris_webhook(
             f"Amount mismatch: expected {invoice.amount}, got {amount}. Pembayaran kami terima tapi ada selisih/kejanggalan. Tim kami akan follow-up sore ini.",
         )
 
-    now = datetime.now(timezone.utc)
-
     invoice.status = InvoiceStatus.PAID
     invoice.paid_at = now.isoformat()
     await save_invoice(invoice)
@@ -108,15 +127,6 @@ async def handle_qris_webhook(
         await save_invoice(next_invoice)
         subscription.current_invoice_id = next_invoice_id
         await save_subscription(subscription)
-
-    entry = MockLedgerEntry(
-        entry_id=str(uuid.uuid4()),
-        reference_code=reference_code,
-        qris_id=qris_id,
-        amount=amount,
-        paid_at=now.isoformat(),
-    )
-    await save_ledger_entry(entry)
 
     # Audit log for payment verification
     await insert_audit_log(

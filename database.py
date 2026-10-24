@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, DecisionType
 
 DB_PATH = "rakitdigital.db"
 
@@ -247,6 +247,51 @@ async def init_db() -> None:
                 new_memories INTEGER NOT NULL,
                 alerts_sent_today INTEGER NOT NULL,
                 generated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS technical_decisions (
+                decision_id TEXT PRIMARY KEY,
+                decision_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                impact_score INTEGER NOT NULL,
+                requires_founder_approval INTEGER NOT NULL,
+                decided_by TEXT NOT NULL,
+                decided_at TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feature_requests (
+                request_id TEXT PRIMARY KEY,
+                client_id TEXT,
+                description TEXT NOT NULL,
+                rice_score INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL,
+                roadmap_target TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_performance (
+                agent_name TEXT NOT NULL,
+                date TEXT NOT NULL,
+                token_usage INTEGER NOT NULL,
+                success_rate REAL NOT NULL,
+                error_rate REAL NOT NULL,
+                tasks_completed INTEGER NOT NULL,
+                tasks_failed INTEGER NOT NULL,
+                PRIMARY KEY (agent_name, date)
             )
             """
         )
@@ -1387,6 +1432,198 @@ async def get_last_report_date() -> str | None:
 async def save_last_report_date(report_date: str) -> None:
     """Track last report date to prevent duplicate reports."""
     pass  # Using daily_reports table for this
+
+
+async def list_alert_events(acknowledged: bool | None = None) -> list[AlertEvent]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if acknowledged is None:
+            query = "SELECT * FROM alert_events ORDER BY created_at DESC"
+            params = ()
+        elif acknowledged:
+            query = "SELECT * FROM alert_events WHERE acknowledged = 1 ORDER BY created_at DESC"
+            params = ()
+        else:
+            query = "SELECT * FROM alert_events WHERE acknowledged = 0 ORDER BY created_at DESC"
+            params = ()
+        cursor = await db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [_row_to_alert_event(row) for row in rows]
+
+
+def _row_to_technical_decision(row: aiosqlite.Row) -> TechnicalDecision:
+    return TechnicalDecision.model_validate(
+        {
+            "decision_id": row["decision_id"],
+            "decision_type": row["decision_type"],
+            "description": row["description"],
+            "impact_score": row["impact_score"],
+            "requires_founder_approval": bool(row["requires_founder_approval"]),
+            "decided_by": row["decided_by"],
+            "decided_at": row["decided_at"],
+            "status": row["status"],
+        }
+    )
+
+
+async def save_technical_decision(decision: TechnicalDecision) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO technical_decisions (
+                decision_id, decision_type, description, impact_score,
+                requires_founder_approval, decided_by, decided_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision.decision_id,
+                decision.decision_type.value,
+                decision.description,
+                decision.impact_score,
+                int(decision.requires_founder_approval),
+                decision.decided_by,
+                decision.decided_at,
+                decision.status.value,
+            ),
+        )
+        await db.commit()
+
+
+async def get_technical_decision(decision_id: str) -> TechnicalDecision | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM technical_decisions WHERE decision_id = ?",
+            (decision_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_technical_decision(row)
+
+
+async def get_technical_decisions_by_type(decision_type: DecisionType) -> list[TechnicalDecision]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM technical_decisions WHERE decision_type = ? ORDER BY decided_at DESC",
+            (decision_type.value,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_technical_decision(row) for row in rows]
+
+
+def _row_to_feature_request(row: aiosqlite.Row) -> FeatureRequest:
+    return FeatureRequest.model_validate(
+        {
+            "request_id": row["request_id"],
+            "client_id": row["client_id"],
+            "description": row["description"],
+            "rice_score": row["rice_score"],
+            "status": row["status"],
+            "evaluated_at": row["evaluated_at"],
+            "roadmap_target": row["roadmap_target"],
+        }
+    )
+
+
+async def save_feature_request(request: FeatureRequest) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO feature_requests (
+                request_id, client_id, description, rice_score, status, evaluated_at, roadmap_target
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request.request_id,
+                request.client_id,
+                request.description,
+                request.rice_score,
+                request.status.value,
+                request.evaluated_at,
+                request.roadmap_target,
+            ),
+        )
+        await db.commit()
+
+
+async def get_feature_request(request_id: str) -> FeatureRequest | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM feature_requests WHERE request_id = ?",
+            (request_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_feature_request(row)
+
+
+async def get_pending_feature_requests() -> list[FeatureRequest]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM feature_requests WHERE status = 'SUBMITTED' ORDER BY evaluated_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_feature_request(row) for row in rows]
+
+
+def _row_to_agent_performance(row: aiosqlite.Row) -> AgentPerformance:
+    return AgentPerformance.model_validate(
+        {
+            "agent_name": row["agent_name"],
+            "date": row["date"],
+            "token_usage": row["token_usage"],
+            "success_rate": row["success_rate"],
+            "error_rate": row["error_rate"],
+            "tasks_completed": row["tasks_completed"],
+            "tasks_failed": row["tasks_failed"],
+        }
+    )
+
+
+async def save_agent_performance(performance: AgentPerformance) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO agent_performance (
+                agent_name, date, token_usage, success_rate, error_rate,
+                tasks_completed, tasks_failed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(agent_name, date) DO UPDATE SET
+                token_usage = excluded.token_usage,
+                success_rate = excluded.success_rate,
+                error_rate = excluded.error_rate,
+                tasks_completed = excluded.tasks_completed,
+                tasks_failed = excluded.tasks_failed
+            """,
+            (
+                performance.agent_name,
+                performance.date,
+                performance.token_usage,
+                performance.success_rate,
+                performance.error_rate,
+                performance.tasks_completed,
+                performance.tasks_failed,
+            ),
+        )
+        await db.commit()
+
+
+async def get_agent_performance_last_30_days() -> list[AgentPerformance]:
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=30)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM agent_performance WHERE date >= ? ORDER BY date DESC",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_agent_performance(row) for row in rows]
 
 
 async def list_alert_events(acknowledged: bool | None = None) -> list[AlertEvent]:

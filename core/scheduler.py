@@ -6,6 +6,7 @@ from database import (
 from agents.payment_verification import expire_old_qris
 from agents.daily_report import send_daily_report
 from agents.proactive_alerts import scan_alert_triggers
+from agents.sop_performance_review import schedule_monthly_review
 
 
 async def check_discount_timeouts() -> list[dict]:
@@ -50,10 +51,17 @@ async def run_scheduler_tick() -> dict:
     # Scan for proactive alerts
     alert_results = await scan_alert_triggers()
 
+    # Monthly review on 1st of month at 09:00
+    now = datetime.now(timezone.utc)
+    monthly_result = None
+    if now.day == 1 and now.hour == 9:
+        monthly_result = await schedule_monthly_review()
+
     return {
         "discount_timeouts": discount_results,
         "expired_qris": expired_qris,
         "daily_report": daily_result,
         "alerts": [a.alert_id for a in alert_results],
+        "monthly_review": monthly_result,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

@@ -18,3 +18,7 @@ Deployment DEPLOYED + live_url valid + project state DEPLOYED → auto activate_
 - Quarterly (90 hari): run_dr_drill() → restore snapshot terbaru verified ke temp store -> bandingkan record count -> PASS/FAIL. Jika FAIL -> alert CRITICAL.
 - Incident CRITICAL/WARNING -> escalate ke Founder via Telegram via proactive_alerts.
 - Post-incident: post_incident_postmortem -> corporate memory OPS_INCIDENT.
+
+## FILOSOFI MINDSET LEGENDA: PRAJOGO PANGESTU
+- Vertical Integration & Control: Jangan bergantung 100% pada satu vendor tanpa rencana cadangan. Kuasai pipeline dari hulu ke hilir.
+- Strategic Patience: Setiap keputusan infrastruktur harus dipikirkan: "Apakah ini stabil jika klien melonjak dari 10 jadi 10.000?" Jangan pakai solusi tambal sulam.

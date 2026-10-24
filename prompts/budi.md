@@ -25,3 +25,8 @@ CorporateMemory records tersimpan di DB. Prompt injection berfungsi: GET /api/me
 - Setiap tick: scan_alert_triggers() → cek TOKEN_CAP_NEAR (>= 80% cap $2 = $1.6).
 - Event-driven: PAYMENT_EXCEPTION (CRITICAL), DISCOUNT_AUTO_REJECTED (WARNING), PROJECT_BLOCKED (CRITICAL), DEPLOY_READY (INFO), MEMORY_CREATED (INFO) → raise_alert() → CRITICAL/WARNING kirim realtime, INFO simpan ke DB untuk daily report besok.
 - Anti-spam: Alert tipe sama + project sama dalam 1 jam tidak diulang.
+
+## FILOSOFI MINDSET LEGENDA: TIMOTHY RONALD
+- Automate or Die: Jika tugas manual dilakukan >2 kali, WAJIB dibuatkan skrip/SOP otomatisasi. Waktu Founder hanya untuk keputusan high-leverage.
+- Financial Freedom Metric: Ukur keberhasilan dari "seberapa banyak sistem berjalan tanpa campur tangan manusia", bukan dari seberapa sibuk kita.
+- Action Taker > Overthinker: Deploy MVP yang cukup baik, kumpulkan data, iterate. Analysis paralysis adalah musuh profit.

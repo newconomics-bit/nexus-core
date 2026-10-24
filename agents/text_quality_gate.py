@@ -13,6 +13,7 @@ BANNED_PHRASES = [
     "pada akhirnya",
     "kesimpulannya",
     "delve",
+    "d.e.l.v.e",
     "unlock potential",
     "elevate",
     "transformasi",
@@ -49,6 +50,7 @@ OPENING_FLUFF_PATTERNS = [
     r"^penting untuk dicatat bahwa",
     r"^seperti yang kita ketahui",
     r"^dalam dunia yang",
+    r"^ini bukan sekadar",
 ]
 
 
@@ -123,7 +125,7 @@ def score_text(text: str) -> dict:
     dramatic_fragments = _count_dramatic_fragments(text)
     
     # Dimension scores (10 = perfect, 0 = worst)
-    banned_score = max(0, 10 - banned_count * 2)
+    banned_score = max(0, 10 - banned_count * 3)
     opening_score = 0 if opening_fluff else 10
     rule_of_three_score = max(0, 10 - rule_of_three_penalty * 3)
     emoji_score = max(0, 10 - emoji_spam * 3)

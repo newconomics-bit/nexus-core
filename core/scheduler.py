@@ -14,7 +14,9 @@ from agents.sop_performance_review import schedule_monthly_review
 from agents.contract_generator import expire_contract
 from agents.customer_success import check_onboarding_progress, check_client_health_all
 from agents.disaster_recovery import run_backup, watchdog_check, run_dr_drill
+from agents.red_team import RedTeamAttacker
 from core.telegram_bot import send_message
+from models import DrillTrigger, RedTeamDrill
 
 
 async def check_discount_timeouts() -> list[dict]:
@@ -171,6 +173,14 @@ async def run_scheduler_tick() -> dict:
     if now.day == 1 and now.hour == 9:
         monthly_result = await schedule_monthly_review()
 
+    # Weekly Red Team Drill - Monday 03:00
+    redteam_result = None
+    if now.weekday() == 0 and now.hour == 3:  # Monday 03:00
+        try:
+            redteam_result = await scheduled_red_team_drill()
+        except Exception as e:
+            print(f"Red team drill failed: {e}")
+
     return {
         "discount_timeouts": discount_results,
         "expired_qris": expired_qris,
@@ -184,5 +194,32 @@ async def run_scheduler_tick() -> dict:
         "watchdog": watchdog_results,
         "drill": drill_result.model_dump() if drill_result else None,
         "monthly_review": monthly_result,
+        "redteam_drill": redteam_result.model_dump() if redteam_result else None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+async def scheduled_red_team_drill() -> RedTeamDrill:
+    """Run scheduled weekly red team drill."""
+    from database import get_last_drill_date
+    
+    # Check if we already ran a drill this week
+    last_drill_str = await get_last_drill_date()
+    if last_drill_str:
+        last_drill = datetime.fromisoformat(last_drill_str.replace("Z", "+00:00"))
+        days_since = (datetime.now(timezone.utc) - last_drill).days
+        if days_since < 7:
+            print(f"Skipping red team drill - last drill was {days_since} days ago")
+            return None
+    
+    attacker = RedTeamAttacker()
+    drill = await attacker.run_all_scenarios(DrillTrigger.SCHEDULED)
+    
+    # Send report to Founder via Telegram
+    report = attacker.generate_report(drill, drill.results)
+    try:
+        await send_message(f"🔴 *SI MERAH WEEKLY DRILL COMPLETED*\n\n{report}")
+    except Exception as e:
+        print(f"Failed to send Telegram report: {e}")
+    
+    return drill

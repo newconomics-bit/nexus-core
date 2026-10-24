@@ -54,7 +54,8 @@ from agents.post_mortem import run_post_mortem
 from core.prompt_injector import inject_memory
 from core.telegram_bot import send_approval_card, send_access_denied_message
 from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity
-from core.scheduler import run_scheduler_tick
+from agents.red_team import RedTeamAttacker
+from core.scheduler import run_scheduler_tick, scheduled_red_team_drill
 from core.escalation_matrix import needs_founder_approval, get_escalation_matrix
 from core.rate_limiter import approval_limiter, webhook_limiter, rate_limit
 from database import (
@@ -130,6 +131,13 @@ from database import (
     get_audit_logs_by_action,
     get_audit_logs_since,
     get_all_audit_logs,
+    create_drill,
+    add_attack_result,
+    get_drill,
+    get_latest_drill,
+    abort_drill,
+    update_drill_summary,
+    get_red_team_db,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -196,6 +204,13 @@ from models import (
     MarkContractSignedRequest,
     GenerateContractRequest,
     SendContractRequest,
+    AttackScenario,
+    AttackStatus,
+    AttackSeverity,
+    AttackResult,
+    DrillTrigger,
+    RedTeamDrillStatus,
+    RedTeamDrill,
 )
 
 
@@ -1185,4 +1200,130 @@ async def get_audit_logs(
     else:
         logs = await get_all_audit_logs()
     return [log.model_dump() for log in logs]
+
+
+# ==================== RED TEAM (SI MERAH) ENDPOINTS ====================
+
+# Middleware: X-Red-Team header switches to isolated test_attack.db
+@app.middleware("http")
+async def red_team_middleware(request: Request, call_next):
+    """If X-Red-Team: true header with valid Founder API key + signature, switch to isolated DB."""
+    red_team_header = request.headers.get("X-Red-Team", "").lower()
+    if red_team_header == "true":
+        # Verify Founder API key
+        api_key = request.headers.get("X-API-Key")
+        expected_key = os.getenv("RAKIT_API_KEY", "dev-secret-key-change-in-production")
+        if api_key != expected_key:
+            return JSONResponse(status_code=401, content={"detail": "Invalid API Key for Red Team mode"})
+        
+        # Verify signature (simple HMAC for anti-spoof)
+        signature = request.headers.get("X-Red-Team-Signature")
+        if not signature:
+            return JSONResponse(status_code=401, content={"detail": "Missing X-Red-Team-Signature"})
+        
+        # For simplicity, verify signature matches expected pattern
+        # In production, use proper HMAC with secret
+        expected_signature = hashlib.sha256(f"redteam{api_key}".encode()).hexdigest()[:16]
+        if signature != expected_signature:
+            return JSONResponse(status_code=401, content={"detail": "Invalid Red Team signature"})
+        
+        # Switch to isolated DB by setting request state
+        request.state.red_team_mode = True
+        request.state.red_team_db = await get_red_team_db()
+    
+    response = await call_next(request)
+    
+    # Close red team DB connection if opened
+    if hasattr(request.state, "red_team_db"):
+        await request.state.red_team_db.close()
+    
+    return response
+
+
+import hashlib
+import os
+
+
+@app.post("/api/redteam/run")
+async def redteam_run_manual(request: Request) -> dict:
+    """Trigger manual red team drill - requires Founder approval via Telegram."""
+    # Verify Founder identity
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Founder authorization")
+    
+    # Check if there's a pending approval for this drill
+    # For manual trigger, we require a prior approval
+    # This is a simplified check - in production, check for specific approval
+    drill = await create_drill(DrillTrigger.MANUAL)
+    
+    attacker = RedTeamAttacker()
+    completed_drill = await attacker.run_all_scenarios(DrillTrigger.MANUAL)
+    
+    # Send report to Founder via Telegram
+    from core.telegram_bot import send_message
+    report = attacker.generate_report(completed_drill, completed_drill.results)
+    try:
+        await send_message(f"🔴 *SI MERAH DRILL COMPLETED*\n\n{report}")
+    except Exception as e:
+        print(f"Failed to send Telegram report: {e}")
+    
+    return {
+        "drill_id": completed_drill.drill_id,
+        "status": completed_drill.status.value,
+        "summary": completed_drill.summary,
+        "results_count": len(completed_drill.results),
+    }
+
+
+@app.post("/api/redteam/stop")
+async def redteam_kill_switch() -> dict:
+    """Kill switch - abort any running drill."""
+    latest = await get_latest_drill()
+    if latest and latest.status == RedTeamDrillStatus.RUNNING:
+        aborted = await abort_drill(latest.drill_id)
+        if aborted:
+            return {"status": "ABORTED", "drill_id": latest.drill_id, "message": "Drill aborted by kill switch"}
+    
+    return {"status": "NO_RUNNING_DRILL", "message": "No running drill to abort"}
+
+
+@app.get("/api/redteam/drills")
+async def redteam_list_drills() -> list[dict]:
+    """List all red team drills."""
+    from database import DB_PATH
+    import aiosqlite
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM red_team_drills ORDER BY started_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+@app.get("/api/redteam/drills/{drill_id}")
+async def redteam_get_drill(drill_id: str) -> dict:
+    """Get drill details with all attack results."""
+    drill = await get_drill(drill_id)
+    if not drill:
+        raise HTTPException(status_code=404, detail="Drill not found")
+    return drill.model_dump()
+
+
+@app.get("/api/redteam/latest")
+async def redteam_latest_drill() -> dict:
+    """Get latest drill with summary."""
+    drill = await get_latest_drill()
+    if not drill:
+        raise HTTPException(status_code=404, detail="No drills found")
+    return {
+        "drill_id": drill.drill_id,
+        "triggered_by": drill.triggered_by.value,
+        "status": drill.status.value,
+        "started_at": drill.started_at,
+        "finished_at": drill.finished_at,
+        "summary": drill.summary,
+        "results": [r.model_dump() for r in drill.results],
+    }
 

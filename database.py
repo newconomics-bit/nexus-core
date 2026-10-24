@@ -4,9 +4,10 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus, AuditLog, AuditAction, AuditResult
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus, AuditLog, AuditAction, AuditResult, AttackScenario, AttackStatus, AttackSeverity, AttackResult, DrillTrigger, RedTeamDrill, RedTeamDrillStatus
 
 DB_PATH = "rakitdigital.db"
+TEST_ATTACK_DB_PATH = "test_attack.db"
 
 
 async def init_db() -> None:
@@ -514,6 +515,35 @@ async def init_db() -> None:
                 result TEXT NOT NULL,
                 context TEXT NOT NULL,
                 timestamp TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS red_team_drills (
+                drill_id TEXT PRIMARY KEY,
+                triggered_by TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                summary TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS attack_results (
+                result_id TEXT PRIMARY KEY,
+                drill_id TEXT NOT NULL,
+                scenario TEXT NOT NULL,
+                status TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                vector TEXT NOT NULL,
+                expected TEXT NOT NULL,
+                actual TEXT NOT NULL,
+                remediation_agent TEXT NOT NULL,
+                remediation_task TEXT NOT NULL,
+                executed_at TEXT NOT NULL
             )
             """
         )
@@ -3061,3 +3091,314 @@ async def get_all_audit_logs() -> list[AuditLog]:
         )
         rows = await cursor.fetchall()
         return [_row_to_audit_log(row) for row in rows]
+
+
+# ==================== RED TEAM (SI MERAH) DATABASE FUNCTIONS ====================
+
+def _row_to_red_team_drill(row: aiosqlite.Row) -> RedTeamDrill:
+    import json
+    results = []
+    if row["results_json"]:
+        results = [AttackResult.model_validate(r) for r in json.loads(row["results_json"])]
+    return RedTeamDrill(
+        drill_id=row["drill_id"],
+        triggered_by=DrillTrigger(row["triggered_by"]),
+        status=DrillStatus(row["status"]),
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        results=results,
+        summary=row["summary"] or "",
+    )
+
+
+async def create_drill(triggered_by: DrillTrigger) -> RedTeamDrill:
+    """Create a new red team drill record."""
+    drill_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc).isoformat()
+    drill = RedTeamDrill(
+        drill_id=drill_id,
+        triggered_by=triggered_by,
+        status=RedTeamDrillStatus.RUNNING,
+        started_at=started_at,
+        results=[],
+        summary="",
+    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO red_team_drills (
+                drill_id, triggered_by, status, started_at, finished_at, summary
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                drill.drill_id,
+                drill.triggered_by.value,
+                drill.status.value,
+                drill.started_at,
+                drill.finished_at,
+                drill.summary,
+            ),
+        )
+        await db.commit()
+    return drill
+
+
+async def add_attack_result(result: AttackResult) -> None:
+    """Add an attack result to a drill."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO attack_results (
+                result_id, drill_id, scenario, status, severity,
+                vector, expected, actual, remediation_agent, remediation_task, executed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                result.result_id,
+                result.drill_id,
+                result.scenario.value,
+                result.status.value,
+                result.severity.value,
+                result.vector,
+                result.expected,
+                result.actual,
+                result.remediation_agent,
+                result.remediation_task,
+                result.executed_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_drill(drill_id: str) -> RedTeamDrill | None:
+    """Get a drill with all its attack results."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM red_team_drills WHERE drill_id = ?",
+            (drill_id,),
+        )
+        drill_row = await cursor.fetchone()
+        if drill_row is None:
+            return None
+
+        # Get attack results for this drill
+        cursor = await db.execute(
+            "SELECT * FROM attack_results WHERE drill_id = ? ORDER BY executed_at",
+            (drill_id,),
+        )
+        result_rows = await cursor.fetchall()
+        results = []
+        for r in result_rows:
+            results.append(
+                AttackResult(
+                    result_id=r["result_id"],
+                    drill_id=r["drill_id"],
+                    scenario=AttackScenario(r["scenario"]),
+                    status=AttackStatus(r["status"]),
+                    severity=AttackSeverity(r["severity"]),
+                    vector=r["vector"],
+                    expected=r["expected"],
+                    actual=r["actual"],
+                    remediation_agent=r["remediation_agent"],
+                    remediation_task=r["remediation_task"],
+                    executed_at=r["executed_at"],
+                )
+            )
+
+        return RedTeamDrill(
+            drill_id=drill_row["drill_id"],
+            triggered_by=DrillTrigger(drill_row["triggered_by"]),
+            status=RedTeamDrillStatus(drill_row["status"]),
+            started_at=drill_row["started_at"],
+            finished_at=drill_row["finished_at"],
+            results=results,
+            summary=drill_row["summary"] or "",
+        )
+
+
+async def get_latest_drill() -> RedTeamDrill | None:
+    """Get the most recent drill."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT drill_id FROM red_team_drills ORDER BY started_at DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return await get_drill(row["drill_id"])
+
+
+async def abort_drill(drill_id: str) -> bool:
+    """Abort a running drill (kill switch)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE red_team_drills SET status = ?, finished_at = ? WHERE drill_id = ? AND status = ?",
+            (
+                RedTeamDrillStatus.ABORTED.value,
+                datetime.now(timezone.utc).isoformat(),
+                drill_id,
+                RedTeamDrillStatus.RUNNING.value,
+            ),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def update_drill_summary(drill_id: str, summary: str, status: RedTeamDrillStatus) -> None:
+    """Update drill summary and status after completion."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE red_team_drills SET summary = ?, status = ?, finished_at = ? WHERE drill_id = ?",
+            (
+                summary,
+                status.value,
+                datetime.now(timezone.utc).isoformat(),
+                drill_id,
+            ),
+        )
+        await db.commit()
+
+
+# Isolated DB connection for red team attacks
+async def get_red_team_db() -> aiosqlite.Connection:
+    """Get a connection to the isolated test_attack.db for red team operations."""
+    conn = await aiosqlite.connect(TEST_ATTACK_DB_PATH)
+    conn.row_factory = aiosqlite.Row
+    # Initialize tables if not exist
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            client_name TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT '',
+            spec_json TEXT
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quotes (
+            quote_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            hpp_breakdown TEXT NOT NULL,
+            margin_pct REAL NOT NULL,
+            discount_pct REAL NOT NULL,
+            final_price INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            valid_until_days INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approvals (
+            approval_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            quote_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            status TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            decided_at TEXT NOT NULL DEFAULT '',
+            decided_by TEXT NOT NULL DEFAULT '',
+            expires_at TEXT
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS invoices (
+            invoice_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            due_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            paid_at TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS qris_requests (
+            qris_id TEXT PRIMARY KEY,
+            invoice_id TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            qr_string TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mock_ledger (
+            entry_id TEXT PRIMARY KEY,
+            reference_code TEXT NOT NULL UNIQUE,
+            qris_id TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            paid_at TEXT NOT NULL
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS corporate_memory (
+            memory_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            lesson_text TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS backups (
+            backup_id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            checksum TEXT NOT NULL,
+            status TEXT NOT NULL,
+            verified INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS incidents (
+            incident_id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            status TEXT NOT NULL,
+            detected_at TEXT NOT NULL,
+            mitigated_at TEXT,
+            resolved_at TEXT,
+            timeline_json TEXT NOT NULL
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS build_tasks (
+            task_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            artifact_id TEXT
+        )
+        """
+    )
+    await conn.commit()
+    return conn

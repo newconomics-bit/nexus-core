@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 import database
 from agents.daily_report import send_daily_report, generate_daily_report, format_report_text
 from agents.proactive_alerts import scan_alert_triggers
+from agents.contract_generator import generate_contract, send_contract, mark_contract_signed
 from agents.sop_pricing import evaluate_pricing_change, process_pricing_change
 from agents.sop_feature_request import evaluate_feature_request
 from agents.sop_performance_review import generate_performance_report, schedule_monthly_review
@@ -37,6 +38,11 @@ from database import (
     get_qris,
     get_qris_by_invoice,
     get_quote,
+    get_contract,
+    list_contracts,
+    get_pending_contracts,
+    get_contracts_nearing_expiry,
+    get_expired_contracts,
     init_db,
     list_pending_approvals,
     save_approval,
@@ -57,6 +63,7 @@ from database import (
     get_pending_feature_requests,
     save_agent_performance,
     get_agent_performance_last_30_days,
+    save_contract,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -100,6 +107,9 @@ from models import (
     FeatureRequest,
     FeatureRequestStatus,
     AgentPerformance,
+    Contract,
+    ContractType,
+    ContractStatus,
 )
 
 
@@ -794,4 +804,43 @@ async def cto_log_agent_performance(performance: AgentPerformance) -> dict:
     from database import save_agent_performance
     await save_agent_performance(performance)
     return {"status": "logged", "agent": performance.agent_name}
+
+
+# Legal/Contract Endpoints
+@app.post("/api/legal/generate-contract")
+async def legal_generate_contract(project_id: str, contract_type: ContractType, client_email: str | None = None) -> dict:
+    contract = await generate_contract(project_id, contract_type, client_email)
+    return contract.model_dump()
+
+
+@app.post("/api/legal/contracts/{contract_id}/send")
+async def legal_send_contract(contract_id: str, client_email: str) -> dict:
+    contract = await send_contract(contract_id, client_email)
+    return contract.model_dump()
+
+
+@app.post("/api/legal/contracts/{contract_id}/mark-signed")
+async def legal_mark_contract_signed(contract_id: str, client_name: str = "", client_title: str = "") -> dict:
+    contract = await mark_contract_signed(contract_id, client_name, client_title)
+    return contract.model_dump()
+
+
+@app.get("/api/legal/contracts")
+async def legal_list_contracts(project_id: str | None = None) -> list[dict]:
+    contracts = await list_contracts(project_id)
+    return [c.model_dump() for c in contracts]
+
+
+@app.get("/api/legal/contracts/pending")
+async def legal_pending_contracts() -> list[dict]:
+    contracts = await get_pending_contracts()
+    return [c.model_dump() for c in contracts]
+
+
+@app.get("/api/legal/contracts/{contract_id}")
+async def legal_get_contract(contract_id: str) -> dict:
+    contract = await get_contract(contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    return contract.model_dump()
 

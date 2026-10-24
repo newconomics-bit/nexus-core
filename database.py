@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, DecisionType
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType
 
 DB_PATH = "rakitdigital.db"
 
@@ -292,6 +292,27 @@ async def init_db() -> None:
                 tasks_completed INTEGER NOT NULL,
                 tasks_failed INTEGER NOT NULL,
                 PRIMARY KEY (agent_name, date)
+            )
+            """
+        )
+        await db.commit()
+
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS contracts (
+                contract_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                contract_type TEXT NOT NULL,
+                template_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL,
+                sent_at TEXT,
+                signed_at TEXT,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                client_email TEXT
             )
             """
         )
@@ -1624,6 +1645,131 @@ async def get_agent_performance_last_30_days() -> list[AgentPerformance]:
         )
         rows = await cursor.fetchall()
         return [_row_to_agent_performance(row) for row in rows]
+
+
+def _row_to_contract(row: aiosqlite.Row) -> Contract:
+    return Contract.model_validate(
+        {
+            "contract_id": row["contract_id"],
+            "project_id": row["project_id"],
+            "contract_type": row["contract_type"],
+            "template_name": row["template_name"],
+            "content": row["content"],
+            "status": row["status"],
+            "sent_at": row["sent_at"],
+            "signed_at": row["signed_at"],
+            "expires_at": row["expires_at"],
+            "created_at": row["created_at"],
+            "client_email": row["client_email"],
+        }
+    )
+
+
+async def save_contract(contract: Contract) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO contracts (
+                contract_id, project_id, contract_type, template_name, content,
+                status, sent_at, signed_at, expires_at, created_at, client_email
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(contract_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                contract_type = excluded.contract_type,
+                template_name = excluded.template_name,
+                content = excluded.content,
+                status = excluded.status,
+                sent_at = excluded.sent_at,
+                signed_at = excluded.signed_at,
+                expires_at = excluded.expires_at,
+                created_at = excluded.created_at,
+                client_email = excluded.client_email
+            """,
+            (
+                contract.contract_id,
+                contract.project_id,
+                contract.contract_type.value,
+                contract.template_name,
+                contract.content,
+                contract.status.value,
+                contract.sent_at,
+                contract.signed_at,
+                contract.expires_at,
+                contract.created_at,
+                contract.client_email,
+            ),
+        )
+        await db.commit()
+
+
+async def get_contract(contract_id: str) -> Contract | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM contracts WHERE contract_id = ?",
+            (contract_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_contract(row)
+
+
+async def list_contracts(project_id: str | None = None) -> list[Contract]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if project_id:
+            cursor = await db.execute(
+                "SELECT * FROM contracts WHERE project_id = ? ORDER BY created_at DESC",
+                (project_id,),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM contracts ORDER BY created_at DESC"
+            )
+        rows = await cursor.fetchall()
+        return [_row_to_contract(row) for row in rows]
+
+
+async def get_pending_contracts() -> list[Contract]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM contracts WHERE status = 'SENT' AND expires_at IS NOT NULL ORDER BY expires_at ASC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_contract(row) for row in rows]
+
+
+async def get_contracts_nearing_expiry(days: int = 3) -> list[Contract]:
+    from datetime import date, timedelta
+    cutoff = (date.today() + timedelta(days=days)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM contracts
+            WHERE status = 'SENT' AND expires_at IS NOT NULL
+            AND date(expires_at) <= date(?)
+            ORDER BY expires_at ASC
+            """,
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_contract(row) for row in rows]
+
+
+async def get_expired_contracts() -> list[Contract]:
+    from datetime import date
+    today = date.today().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM contracts WHERE status = 'SENT' AND expires_at IS NOT NULL AND date(expires_at) < date(?)",
+            (today,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_contract(row) for row in rows]
 
 
 async def list_alert_events(acknowledged: bool | None = None) -> list[AlertEvent]:

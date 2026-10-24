@@ -415,3 +415,31 @@ class AgentPerformance(BaseModel):
     tasks_completed: int
     tasks_failed: int
 
+
+class ContractType(str, Enum):
+    MSA = "MSA"
+    NDA = "NDA"
+    TOS = "TOS"
+    PRIVACY = "PRIVACY"
+
+
+class ContractStatus(str, Enum):
+    DRAFT = "DRAFT"
+    SENT = "SENT"
+    SIGNED = "SIGNED"
+    EXPIRED = "EXPIRED"
+
+
+class Contract(BaseModel):
+    contract_id: str
+    project_id: str
+    contract_type: ContractType
+    template_name: str
+    content: str
+    status: ContractStatus = ContractStatus.DRAFT
+    sent_at: str | None = None
+    signed_at: str | None = None
+    expires_at: str | None = None
+    created_at: str
+    client_email: str | None = None
+

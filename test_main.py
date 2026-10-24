@@ -13,8 +13,12 @@ from agents.sop_feature_request import evaluate_feature_request
 from agents.sop_performance_review import generate_performance_report
 from agents.sop_knowledge_mgmt import evaluate_prompt_update, process_prompt_update
 from agents.sop_feature_request import calculate_rice_score
+from agents.contract_generator import (
+    generate_contract, send_contract, mark_contract_signed, get_expired_contracts, get_contracts_nearing_expiry
+)
+from agents.sop_feature_request import calculate_rice_score
 from core.escalation_matrix import needs_founder_approval, get_escalation_matrix
-from models import AgentPerformance, DecisionType
+from models import AgentPerformance, DecisionType, ContractType, ContractStatus
 
 
 API_KEY = "dev-secret-key-change-in-production"
@@ -2218,6 +2222,192 @@ def test_no_external_tools_installed_wave14():
         assert pkg not in reqs, f"Forbidden package {pkg} found in requirements.txt"
     
     # Check package.json if exists
+    import os
+    if os.path.exists("package.json"):
+        with open("package.json") as f:
+            pkg_json = f.read().lower()
+        for pkg in forbidden:
+            assert pkg not in pkg_json, f"Forbidden package {pkg} found in package.json"
+
+
+# ==================== WAVE 15 TESTS ====================
+
+def test_generate_contract_msa(client):
+    """Test generate MSA contract from project."""
+    project_id = _deployed_project(client)
+    
+    contract = asyncio.run(generate_contract(project_id, ContractType.MSA))
+    assert contract.contract_id
+    assert contract.project_id == project_id
+    assert contract.contract_type == ContractType.MSA
+    assert contract.status == ContractStatus.DRAFT
+    assert "RakitDigital" in contract.content
+    assert "msa" in contract.template_name
+
+
+def test_generate_all_contract_types(client):
+    """Test generate all 4 contract types."""
+    project_id = _deployed_project(client)
+    
+    for ct in [ContractType.MSA, ContractType.NDA, ContractType.TOS, ContractType.PRIVACY]:
+        contract = asyncio.run(generate_contract(project_id, ct))
+        assert contract.contract_type == ct
+        assert contract.status == ContractStatus.DRAFT
+
+
+def test_send_contract_mock_email(client):
+    """Test send contract via mock email."""
+    project_id = _deployed_project(client)
+    contract = asyncio.run(generate_contract(project_id, ContractType.MSA))
+    
+    sent_contract = asyncio.run(send_contract(contract.contract_id, "client@example.com"))
+    assert sent_contract.status == ContractStatus.SENT
+    assert sent_contract.sent_at is not None
+    assert sent_contract.expires_at is not None
+    assert sent_contract.client_email == "client@example.com"
+
+
+def test_mark_contract_signed(client):
+    """Test mark contract as signed."""
+    project_id = _deployed_project(client)
+    contract = asyncio.run(generate_contract(project_id, ContractType.MSA))
+    asyncio.run(send_contract(contract.contract_id, "client@example.com"))
+    
+    signed = asyncio.run(mark_contract_signed(contract.contract_id, "John Doe", "CTO"))
+    assert signed.status == ContractStatus.SIGNED
+    assert signed.signed_at is not None
+    assert "John Doe" in signed.content
+
+
+def test_contract_expiry_and_escalation(client):
+    """Test contract expiry tracking and escalation logic."""
+    from datetime import date, timedelta
+    
+    project_id = _deployed_project(client)
+    contract = asyncio.run(generate_contract(project_id, ContractType.MSA))
+    asyncio.run(send_contract(contract.contract_id, "client@example.com"))
+    
+    # Manually expire the contract in DB
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE contracts SET expires_at = ? WHERE contract_id = ?",
+            ((date.today() - timedelta(days=1)).isoformat(), contract.contract_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    
+    # Check expired contracts
+    expired = asyncio.run(get_expired_contracts())
+    assert any(c.contract_id == contract.contract_id for c in expired)
+
+
+def test_contract_reminder_h3(client):
+    """Test H-3 reminder for contracts nearing expiry."""
+    from datetime import date, timedelta
+    
+    project_id = _deployed_project(client)
+    contract = asyncio.run(generate_contract(project_id, ContractType.MSA))
+    asyncio.run(send_contract(contract.contract_id, "client@example.com"))
+    
+    # Set expiry to 3 days from now
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE contracts SET expires_at = ? WHERE contract_id = ?",
+            ((date.today() + timedelta(days=3)).isoformat(), contract.contract_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    
+    # Check contracts nearing expiry
+    expiring = asyncio.run(get_contracts_nearing_expiry(days=3))
+    assert any(c.contract_id == contract.contract_id for c in expiring)
+
+
+def test_legal_endpoints(client):
+    """Test legal endpoints."""
+    project_id = _deployed_project(client)
+    
+    # Generate contract
+    resp = client.post(f"/api/legal/generate-contract", params={
+        "project_id": project_id,
+        "contract_type": "MSA"
+    })
+    assert resp.status_code == 200
+    contract = resp.json()
+    assert contract["contract_type"] == "MSA"
+    contract_id = contract["contract_id"]
+    
+    # Send contract
+    resp = client.post(f"/api/legal/contracts/{contract_id}/send", params={"client_email": "test@example.com"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "SENT"
+    
+    # List contracts
+    resp = client.get("/api/legal/contracts")
+    assert resp.status_code == 200
+    contracts = resp.json()
+    assert len(contracts) >= 1
+    
+    # Pending contracts
+    resp = client.get("/api/legal/contracts/pending")
+    assert resp.status_code == 200
+    pending = resp.json()
+    assert len(pending) >= 1
+
+
+def test_contract_escalation_after_7_days(client):
+    """Test contract escalation to Founder after 7 days."""
+    from datetime import date, timedelta
+    import asyncio
+    
+    project_id = _deployed_project(client)
+    contract = asyncio.run(generate_contract(project_id, ContractType.MSA))
+    asyncio.run(send_contract(contract.contract_id, "client@example.com"))
+    
+    # Manually expire the contract (8 days ago)
+    import sqlite3
+    from database import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE contracts SET expires_at = ? WHERE contract_id = ?",
+            ((date.today() - timedelta(days=8)).isoformat(), contract.contract_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    
+    # Run scheduler tick (should trigger escalation)
+    resp = client.post("/api/scheduler/tick")
+    assert resp.status_code == 200
+    result = resp.json()
+    assert "contract_escalations" in result
+    # Check that escalation was triggered
+    escalations = result["contract_escalations"]
+    assert len(escalations) >= 1
+
+
+def test_no_external_tools_installed_wave15():
+    """Test HARD RULES no.5: no external tools packages installed (Wave 15)."""
+    with open("requirements.txt") as f:
+        reqs = f.read().lower()
+    
+    forbidden = [
+        "impeccable", "better-icons", "hallmark", "taste-skill", "stop-slop",
+        "humanizer", "open-design", "mailcheap", "helpin", "inbox-zero",
+        "office-kw", "figcraft", "n8n", "zendesk", "hubspot", "vapi", "apollo"
+    ]
+    for pkg in forbidden:
+        assert pkg not in reqs, f"Forbidden package {pkg} found in requirements.txt"
+    
     import os
     if os.path.exists("package.json"):
         with open("package.json") as f:

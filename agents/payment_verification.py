@@ -12,9 +12,10 @@ from database import (
     save_ledger_entry,
     save_qris,
     save_subscription,
+    insert_audit_log,
 )
 from agents.proactive_alerts import alert_payment_exception
-from models import Invoice, InvoiceStatus, MockLedgerEntry, QrisRequest, QrisStatus, Subscription
+from models import Invoice, InvoiceStatus, MockLedgerEntry, QrisRequest, QrisStatus, Subscription, AuditAction, AuditResult
 
 
 async def generate_qris(invoice: Invoice) -> QrisRequest:
@@ -116,6 +117,15 @@ async def handle_qris_webhook(
         paid_at=now.isoformat(),
     )
     await save_ledger_entry(entry)
+
+    # Audit log for payment verification
+    await insert_audit_log(
+        actor="system",
+        action=AuditAction.PAYMENT_VERIFIED.value,
+        target_id=invoice.invoice_id,
+        result=AuditResult.SUCCESS.value,
+        context={"reference_code": reference_code, "amount": amount, "qris_id": qris_id},
+    )
 
     return VerificationResult.VERIFIED, "Payment verified successfully"
 

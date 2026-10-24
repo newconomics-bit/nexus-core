@@ -21,6 +21,7 @@ from database import (
     get_last_backup_date,
     get_last_drill_date,
     save_incident as db_save_incident,
+    insert_audit_log,
 )
 from agents.proactive_alerts import raise_alert
 from agents.post_mortem import run_post_mortem
@@ -38,6 +39,8 @@ from models import (
     CorporateMemory,
     MemoryCategory,
     MemorySeverity,
+    AuditAction,
+    AuditResult,
 )
 
 
@@ -366,6 +369,15 @@ async def resolve_incident(incident_id: str) -> Incident | None:
 
     from database import save_incident
     await save_incident(incident)
+
+    # Audit log for incident resolution
+    await insert_audit_log(
+        actor="system",
+        action=AuditAction.INCIDENT_RESOLVED.value,
+        target_id=incident_id,
+        result=AuditResult.SUCCESS.value,
+        context={"incident_type": incident.type.value, "severity": incident.severity.value, "mitigation": incident.timeline[-2]['action'] if len(incident.timeline) >= 2 else incident.timeline[-1]['action']},
+    )
 
     # Trigger post-incident postmortem
     await post_incident_postmortem(incident.incident_id)

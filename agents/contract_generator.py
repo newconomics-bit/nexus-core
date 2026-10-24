@@ -10,8 +10,9 @@ from database import (
     get_expired_contracts,
     get_contracts_nearing_expiry,
     get_contract,
+    insert_audit_log,
 )
-from models import Contract, ContractType, ContractStatus, ProjectSpec, Quote
+from models import Contract, ContractType, ContractStatus, ProjectSpec, Quote, AuditAction, AuditResult
 
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
@@ -152,6 +153,15 @@ async def mark_contract_signed(contract_id: str, client_name: str = "", client_t
     contract.status = ContractStatus.SIGNED
     contract.signed_at = datetime.now(timezone.utc).isoformat()
     await save_contract(contract)
+
+    # Audit log for contract signing
+    await insert_audit_log(
+        actor="system",
+        action=AuditAction.CONTRACT_SIGNED.value,
+        target_id=contract_id,
+        result=AuditResult.SUCCESS.value,
+        context={"contract_type": contract.contract_type.value, "client_name": client_name, "project_id": contract.project_id},
+    )
 
     return contract
 

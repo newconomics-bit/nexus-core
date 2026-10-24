@@ -1,9 +1,10 @@
 import json
+import uuid
 from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus, AuditLog, AuditAction, AuditResult
 
 DB_PATH = "rakitdigital.db"
 
@@ -500,6 +501,19 @@ async def init_db() -> None:
                 total_score INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 evaluated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                log_id TEXT PRIMARY KEY,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                result TEXT NOT NULL,
+                context TEXT NOT NULL,
+                timestamp TEXT NOT NULL
             )
             """
         )
@@ -2959,3 +2973,91 @@ async def list_partnerships() -> list[PartnershipEvaluation]:
         )
         rows = await cursor.fetchall()
         return [_row_to_partnership(row) for row in rows]
+
+
+def _row_to_audit_log(row: aiosqlite.Row) -> AuditLog:
+    import json
+    return AuditLog.model_validate(
+        {
+            "log_id": row["log_id"],
+            "actor": row["actor"],
+            "action": row["action"],
+            "target_id": row["target_id"],
+            "result": row["result"],
+            "context": json.loads(row["context"]),
+            "timestamp": row["timestamp"],
+        }
+    )
+
+
+async def insert_audit_log(
+    actor: str,
+    action: str,
+    target_id: str,
+    result: str,
+    context: dict,
+) -> None:
+    """Insert an audit log entry (append-only, immutable)."""
+    log_id = str(uuid.uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO audit_logs (
+                log_id, actor, action, target_id, result, context, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                actor,
+                action,
+                target_id,
+                result,
+                json.dumps(context),
+                timestamp,
+            ),
+        )
+        await db.commit()
+
+
+async def get_audit_logs_by_actor(actor: str) -> list[AuditLog]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM audit_logs WHERE actor = ? ORDER BY timestamp DESC",
+            (actor,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_audit_log(row) for row in rows]
+
+
+async def get_audit_logs_by_action(action: str) -> list[AuditLog]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM audit_logs WHERE action = ? ORDER BY timestamp DESC",
+            (action,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_audit_log(row) for row in rows]
+
+
+async def get_audit_logs_since(timestamp: str) -> list[AuditLog]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM audit_logs WHERE timestamp >= ? ORDER BY timestamp ASC",
+            (timestamp,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_audit_log(row) for row in rows]
+
+
+async def get_all_audit_logs() -> list[AuditLog]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM audit_logs ORDER BY timestamp DESC"
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_audit_log(row) for row in rows]

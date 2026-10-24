@@ -8,6 +8,7 @@ from database import (
     save_approval,
     save_deployment,
     update_project_state,
+    insert_audit_log,
 )
 from agents.proactive_alerts import alert_deploy_ready
 from core.telegram_bot import send_approval_card
@@ -18,6 +19,8 @@ from models import (
     DeploymentRequest,
     DeploymentStatus,
     DomainChoice,
+    AuditAction,
+    AuditResult,
 )
 
 
@@ -110,6 +113,16 @@ async def execute_deployment(approval_id: str) -> dict:
     await update_project_state(deployment.project_id, "DEPLOYED")
 
     live_url = deployment.hosted_url or deployment.custom_domain_url
+
+    # Audit log for production deployment
+    await insert_audit_log(
+        actor="founder",
+        action=AuditAction.DEPLOY_PRODUCTION.value,
+        target_id=deployment.project_id,
+        result=AuditResult.SUCCESS.value,
+        context={"deployment_id": deployment_id, "domain_choice": deployment.domain_choice.value, "live_url": live_url},
+    )
+
     return {
         "deployment_id": deployment_id,
         "status": "DEPLOYED",

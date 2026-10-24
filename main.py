@@ -2,7 +2,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse
 
 import database
@@ -56,6 +56,7 @@ from core.telegram_bot import send_approval_card, send_access_denied_message
 from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity
 from core.scheduler import run_scheduler_tick
 from core.escalation_matrix import needs_founder_approval, get_escalation_matrix
+from core.rate_limiter import approval_limiter, webhook_limiter, rate_limit
 from database import (
     create_project,
     get_approval,
@@ -124,6 +125,11 @@ from database import (
     get_partnership,
     list_partnerships,
     get_partnerships_recommended,
+    insert_audit_log,
+    get_audit_logs_by_actor,
+    get_audit_logs_by_action,
+    get_audit_logs_since,
+    get_all_audit_logs,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -187,6 +193,9 @@ from models import (
     PartnershipStatus,
     AgentPerformance,
     ContractType,
+    MarkContractSignedRequest,
+    GenerateContractRequest,
+    SendContractRequest,
 )
 
 
@@ -379,6 +388,9 @@ async def decide_approval(approval_id: str, decision: str, decided_by: str) -> d
     await update_approval_status(
         approval_id, ApprovalStatus.APPROVED.value, decided_at, decided_by
     )
+    # Audit log for quote approval
+    from agents.finance_costing import log_quote_approved
+    await log_quote_approved(approval.quote_id, updated.discount_pct, updated.final_price)
     return {
         "approval_id": approval_id,
         "status": ApprovalStatus.APPROVED.value,
@@ -393,12 +405,14 @@ async def pending_approvals():
 
 
 @app.post("/api/approvals/{approval_id}/decide")
-async def decide_approval_endpoint(approval_id: str, body: DecideRequest) -> dict:
+@rate_limit(approval_limiter, lambda r: r.headers.get("X-Telegram-Chat-Id", r.client.host))
+async def decide_approval_endpoint(approval_id: str, body: DecideRequest, request: Request) -> dict:
     return await decide_approval(approval_id, body.decision, body.decided_by)
 
 
 @app.post("/api/telegram/webhook", dependencies=[Depends(verify_telegram_secret)])
-async def telegram_webhook(payload: dict) -> dict:
+@rate_limit(webhook_limiter, lambda r: r.client.host)
+async def telegram_webhook(payload: dict, request: Request) -> dict:
     callback = payload.get("callback_query")
     if not isinstance(callback, dict):
         raise HTTPException(status_code=400, detail="callback_query missing")
@@ -707,7 +721,8 @@ async def simulate_qris_scan(body: dict) -> dict:
 
 
 @app.post("/api/webhooks/qris", dependencies=[Depends(verify_telegram_secret)])
-async def qris_webhook(payload: dict) -> dict:
+@rate_limit(webhook_limiter, lambda r: r.client.host)
+async def qris_webhook(payload: dict, request: Request) -> dict:
     reference_code = payload.get("reference_code")
     qris_id = payload.get("qris_id")
     amount = payload.get("amount")
@@ -885,20 +900,20 @@ async def cto_log_agent_performance(performance: AgentPerformance) -> dict:
 
 # Legal/Contract Endpoints
 @app.post("/api/legal/generate-contract")
-async def legal_generate_contract(project_id: str, contract_type: ContractType, client_email: str | None = None) -> dict:
-    contract = await generate_contract(project_id, contract_type, client_email)
+async def legal_generate_contract(body: GenerateContractRequest) -> dict:
+    contract = await generate_contract(body.project_id, body.contract_type, body.client_email)
     return contract.model_dump()
 
 
 @app.post("/api/legal/contracts/{contract_id}/send")
-async def legal_send_contract(contract_id: str, client_email: str) -> dict:
-    contract = await send_contract(contract_id, client_email)
+async def legal_send_contract(contract_id: str, body: SendContractRequest) -> dict:
+    contract = await send_contract(contract_id, body.client_email)
     return contract.model_dump()
 
 
 @app.post("/api/legal/contracts/{contract_id}/mark-signed")
-async def legal_mark_contract_signed(contract_id: str, client_name: str = "", client_title: str = "") -> dict:
-    contract = await mark_contract_signed(contract_id, client_name, client_title)
+async def legal_mark_contract_signed(contract_id: str, body: MarkContractSignedRequest) -> dict:
+    contract = await mark_contract_signed(contract_id, body.client_name, body.client_title)
     return contract.model_dump()
 
 
@@ -1152,4 +1167,22 @@ async def marketing_list_partnerships(status: str | None = None) -> list[dict]:
     else:
         partnerships = await list_partnerships()
     return [p.model_dump() for p in partnerships]
+
+
+# Security: Audit Log Endpoint (Founder only)
+@app.get("/api/audit-logs")
+async def get_audit_logs(
+    actor: str | None = None,
+    action: str | None = None,
+    since: str | None = None,
+) -> list[dict]:
+    if actor:
+        logs = await get_audit_logs_by_actor(actor)
+    elif action:
+        logs = await get_audit_logs_by_action(action)
+    elif since:
+        logs = await get_audit_logs_since(since)
+    else:
+        logs = await get_all_audit_logs()
+    return [log.model_dump() for log in logs]
 

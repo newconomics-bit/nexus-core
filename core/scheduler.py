@@ -10,6 +10,7 @@ from agents.daily_report import send_daily_report
 from agents.proactive_alerts import scan_alert_triggers, alert_project_blocked
 from agents.sop_performance_review import schedule_monthly_review
 from agents.contract_generator import expire_contract
+from agents.customer_success import check_onboarding_progress, check_client_health_all
 from core.telegram_bot import send_message
 
 
@@ -114,6 +115,24 @@ async def run_scheduler_tick() -> dict:
     reminder_results = await check_contract_reminders()
     escalation_results = await check_contract_escalations()
 
+    # Onboarding progress check (daily)
+    onboarding_results = []
+    try:
+        from agents.customer_success import check_onboarding_progress
+        onboarding_results = await check_onboarding_progress()
+    except Exception as e:
+        print(f"Onboarding check failed: {e}")
+
+    # Weekly health score check (Mondays)
+    now = datetime.now(timezone.utc)
+    weekly_health_results = None
+    if now.weekday() == 0:  # Monday
+        try:
+            from agents.customer_success import check_client_health_all
+            weekly_health_results = await check_client_health_all()
+        except Exception as e:
+            print(f"Weekly health check failed: {e}")
+
     # Monthly review on 1st of month at 09:00
     now = datetime.now(timezone.utc)
     monthly_result = None
@@ -127,6 +146,8 @@ async def run_scheduler_tick() -> dict:
         "alerts": [a.alert_id for a in alert_results],
         "contract_reminders": reminder_results,
         "contract_escalations": escalation_results,
+        "onboarding_progress": onboarding_results,
+        "weekly_health_scores": weekly_health_results,
         "monthly_review": monthly_result,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

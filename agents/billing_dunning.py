@@ -13,6 +13,7 @@ from database import (
     update_project_state,
 )
 from agents.post_mortem import run_post_mortem
+from agents.customer_success import generate_onboarding
 from agents.text_quality_gate import enforce
 from models import Invoice, InvoiceStatus, ProjectState, Subscription, SubscriptionStatus
 
@@ -66,6 +67,9 @@ async def activate_subscription(project_id: str, monthly_fee: int = DEFAULT_MONT
     await update_project_state(project_id, ProjectState.SUBSCRIPTION.value)
 
     await run_post_mortem(project_id)
+
+    # Generate onboarding plan for Dewi
+    await generate_onboarding(project_id)
 
     return subscription
 

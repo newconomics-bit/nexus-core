@@ -105,6 +105,11 @@ class SignRequest(BaseModel):
     quote_id: str
 
 
+class MarkContractSignedRequest(BaseModel):
+    client_name: str = ""
+    client_title: str = ""
+
+
 class ApprovalType(str, Enum):
     DISCOUNT_ESCALATION = "DISCOUNT_ESCALATION"
     DEPLOY = "DEPLOY"
@@ -429,6 +434,16 @@ class ContractType(str, Enum):
     PRIVACY = "PRIVACY"
 
 
+class GenerateContractRequest(BaseModel):
+    project_id: str
+    contract_type: ContractType
+    client_email: str | None = None
+
+
+class SendContractRequest(BaseModel):
+    client_email: str
+
+
 class ContractStatus(str, Enum):
     DRAFT = "DRAFT"
     SENT = "SENT"
@@ -679,4 +694,29 @@ class PartnershipEvaluation(BaseModel):
     total_score: int
     status: PartnershipStatus = PartnershipStatus.EVALUATING
     evaluated_at: str
+
+
+class AuditAction(str, Enum):
+    QUOTE_APPROVED = "QUOTE_APPROVED"
+    PAYMENT_VERIFIED = "PAYMENT_VERIFIED"
+    DEPLOY_PRODUCTION = "DEPLOY_PRODUCTION"
+    CONTRACT_SIGNED = "CONTRACT_SIGNED"
+    INCIDENT_RESOLVED = "INCIDENT_RESOLVED"
+    PRICING_CHANGE_APPROVED = "PRICING_CHANGE_APPROVED"
+    APPROVAL_GRANTED = "APPROVAL_GRANTED"
+
+
+class AuditResult(str, Enum):
+    SUCCESS = "SUCCESS"
+    FAIL = "FAIL"
+
+
+class AuditLog(BaseModel):
+    log_id: str
+    actor: str
+    action: AuditAction
+    target_id: str
+    result: AuditResult
+    context: dict
+    timestamp: str
 

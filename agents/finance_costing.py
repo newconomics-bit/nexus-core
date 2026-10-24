@@ -2,8 +2,8 @@ import math
 import uuid
 from datetime import datetime, timezone
 
-from database import get_latest_quote
-from models import EffortEstimate, HppBreakdown, ProjectSpec, Quote, QuoteStatus
+from database import get_latest_quote, insert_audit_log
+from models import EffortEstimate, HppBreakdown, ProjectSpec, Quote, QuoteStatus, AuditAction, AuditResult
 
 INFRA_COST = 150_000
 LABOR_RATE = 75_000
@@ -89,4 +89,15 @@ def apply_discount(quote: Quote, discount_pct: int, founder_approved: bool) -> Q
     )
     return quote.model_copy(
         update={"discount_pct": discount_pct, "final_price": final_price}
+    )
+
+
+async def log_quote_approved(quote_id: str, discount_pct: int, final_price: int) -> None:
+    """Log audit entry for quote approval."""
+    await insert_audit_log(
+        actor="founder",
+        action=AuditAction.QUOTE_APPROVED.value,
+        target_id=quote_id,
+        result=AuditResult.SUCCESS.value,
+        context={"discount_pct": discount_pct, "final_price": final_price},
     )

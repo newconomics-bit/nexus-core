@@ -13,6 +13,7 @@ from database import (
     update_onboarding_item,
 )
 from agents.text_quality_gate import enforce
+from core.pii_masker import mask_pii_in_text
 from models import (
     ClientHealth,
     OnboardingItem,
@@ -109,7 +110,7 @@ async def check_onboarding_progress() -> list[dict]:
                     "project_id": project["id"],
                     "item_id": item.item_id,
                     "action": "REMINDER_SENT",
-                    "message": message,
+                    "message": mask_for_logging(message),
                 })
 
         # Check Day 7 completion rate
@@ -239,6 +240,11 @@ def _enforce_text_quality(message: str) -> str:
     if should_send:
         return message
     return "Halo, info dari tim Customer Success kami."
+
+
+def mask_for_logging(text: str) -> str:
+    """Mask PII in text before logging to corporate memory or sending to non-Founder."""
+    return mask_pii_in_text(text)
 
 
 async def compute_health_score(project_id: str) -> ClientHealth:

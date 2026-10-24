@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from agents.text_quality_gate import enforce
 from core.llm_gateway import call_llm
+from core.pii_masker import mask_pii_in_text
 from models import ProjectSpec
 
 SARI_MODEL = "anthropic/claude-3.5-sonnet"
@@ -69,3 +70,8 @@ async def run_discovery(project_id: str, client_message: str, db_session) -> dic
         "reply": clean_reply,
         "spec": spec.model_dump(),
     }
+
+
+def mask_for_logging(text: str) -> str:
+    """Mask PII in text before logging to corporate memory or sending to non-Founder."""
+    return mask_pii_in_text(text)

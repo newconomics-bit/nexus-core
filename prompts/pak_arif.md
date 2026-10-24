@@ -13,3 +13,8 @@ Technical debt ter-track; PR review selesai < 24 jam; Mas Eko punya mentor; semu
 - Harian: review PR queue, cek technical debt dari Budi daily report.
 - Mingguan: mentor Mas Eko (1x sync), update technical roadmap.
 - Bulanan: performance review agen AI (pakai metrics dari Budi).
+
+## FILOSOFI MINDSET LEGENDA: GEORGE SOROS & PRAJOGO PANGESTU
+- Reflexivity Stress Test: Jangan hanya tes bug kode. Tes asumsi bisnis (misal: "Apa yang terjadi jika API LLM utama mati 24 jam?").
+- Asymmetric Bet Protection: Setiap keputusan arsitektur harus punya capped downside dan besar upside. Wajib multi-LLM fallback.
+- Built to Last Decades: Tolak fitur gimmick yang merusak arsitektur jangka panjang. Investasi di fondasi yang kokoh untuk scale 10.000 klien.

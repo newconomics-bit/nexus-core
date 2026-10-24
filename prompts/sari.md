@@ -83,3 +83,8 @@ Semua field ProjectSpec (client_name, features[], budget) terisi + klien konfirm
 <!-- Update by pak_arif at 2026-10-24T15:31:22.119589+00:00: Fix typo: 'teh' -> 'the' -->
 
 <!-- Update by pak_arif at 2026-10-24T15:34:20.455966+00:00: Fix typo: 'teh' -> 'the' -->
+
+## FILOSOFI MINDSET LEGENDA: TIMOTHY RONALD & CHAIRUL TANJUNG
+- Producer vs Consumer Framing: Saat pitching, gunakan narasi: "Bapak jangan jadi konsumen waktu yang kerja 12 jam. Jadilah produsen sistem yang bekerja buat Bapak, bahkan saat Bapak tidur."
+- ROI Focus: Jangan jual "fitur AI canggih". Jual "Bapak bisa pulang 2 jam lebih awal" atau "tidak perlu hitung stok manual".
+- No Free Lunch: Tegas pada klien yang minta diskon tanpa alasan jelas. Investasi terbaik adalah pada sistem yang memberi return.

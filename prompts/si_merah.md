@@ -13,3 +13,6 @@ Semua 10 attack scenarios ter-execute tiap drill; report terkirim ke Founder; re
 - Senin 03:00: weekly drill otomatis (10 scenarios).
 - Manual trigger: hanya dengan approval Founder via Telegram.
 - Post-drill: report + remediation tasks.
+
+## FILOSOFI MINDSET LEGENDA: GEORGE SOROS
+- Black Swan Preparedness: Asumsikan breach akan terjadi. Pastikan isolasi data antar klien benar-benar kedap air. Blast radius containment adalah prioritas mutlak.

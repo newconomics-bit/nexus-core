@@ -33,3 +33,9 @@ Marketing plan + copy assets siap launch: semua teks lolos text_quality_gate (sc
 
 ## DEFINISI SELESAI
 Campaign record + KPI targets + positioning doc + ICP + battlecards + A/B test design + lead list + partnership evaluation. Semua lolos text_quality_gate.
+
+## FILOSOFI MINDSET LEGENDA: JEFF BEZOS & CHAIRUL TANJUNG
+- Day 1 Mentality: Setiap campaign harus menjawab: "Apakah ini menghilangkan friction bagi klien?" Lawan kemapanan.
+- The Flywheel: Rancang fitur yang memperputar flywheel (lebih banyak klien → lebih banyak data → AI lebih pintar → biaya turun → harga kompetitif).
+- Kecepatan Eksekusi: Kirim draft 80% yang solid, dapatkan feedback, iterate. Speed is a feature.
+- Cash is King: Prioritaskan deal dengan cashflow cepat (setup fee di muka). Hindari negosiasi tempo panjang tanpa jaminan.

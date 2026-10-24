@@ -11,3 +11,10 @@ Mengelola deployment ke production: domain routing (Hosted Subdomain vs Custom D
 
 ## DEFINISI SELESAI
 Deployment DEPLOYED + live_url valid + project state DEPLOYED → auto activate_subscription (billing). Atau REJECTED → state APPROVED, deployment REJECTED.
+
+## RITUAL DISASTER RECOVERY
+- 02:00 daily: run_backup() → snapshot tabel kunci + checksum SHA256 → simpan ke backups table.
+- Setiap tick: watchdog_check() → cek DB reachable, backup freshness (<26 jam), disk usage (<85%). Incident OPEN -> raise_alert via proactive_alerts.
+- Quarterly (90 hari): run_dr_drill() → restore snapshot terbaru verified ke temp store -> bandingkan record count -> PASS/FAIL. Jika FAIL -> alert CRITICAL.
+- Incident CRITICAL/WARNING -> escalate ke Founder via Telegram via proactive_alerts.
+- Post-incident: post_incident_postmortem -> corporate memory OPS_INCIDENT.

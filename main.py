@@ -8,6 +8,14 @@ from fastapi.responses import JSONResponse
 import database
 from agents.daily_report import send_daily_report, generate_daily_report, format_report_text
 from agents.proactive_alerts import scan_alert_triggers
+from agents.disaster_recovery import (
+    run_backup,
+    verify_backup,
+    run_dr_drill,
+    watchdog_check,
+    mitigate_incident,
+    resolve_incident,
+)
 from agents.customer_success import (
     generate_onboarding,
     complete_onboarding_item,
@@ -53,6 +61,14 @@ from database import (
     get_contracts_nearing_expiry,
     get_expired_contracts,
     get_active_client_projects,
+    get_backup,
+    get_latest_backup,
+    save_backup,
+    get_incident,
+    get_open_incidents,
+    get_incidents_by_type_open,
+    save_incident,
+    save_drill,
     init_db,
     list_pending_approvals,
     save_approval,
@@ -124,6 +140,15 @@ from models import (
     SubscriptionStatus,
     SupportTicket,
     TicketStatus,
+    BackupRecord,
+    BackupType,
+    BackupStatus,
+    Incident,
+    IncidentType,
+    IncidentSeverity,
+    IncidentStatus,
+    DrillResult,
+    DrillStatus,
     TaskKind,
     TaskStatus,
     TechnicalDecision,
@@ -927,4 +952,64 @@ async def cs_health_scores(flagged: bool | None = None) -> list[dict]:
 async def cs_compute_health(project_id: str) -> dict:
     health = await compute_health_score(project_id)
     return health.model_dump()
+
+
+# Disaster Recovery / Ops Endpoints
+@app.post("/api/ops/backup/run")
+async def ops_run_backup() -> dict:
+    backup = await run_backup()
+    return backup.model_dump()
+
+
+@app.get("/api/ops/backups")
+async def ops_list_backups() -> list[dict]:
+    # For now, just return latest backup
+    backup = await get_latest_backup()
+    if not backup:
+        return []
+    return [backup.model_dump()]
+
+
+@app.post("/api/ops/backups/{backup_id}/verify")
+async def ops_verify_backup(backup_id: str) -> dict:
+    verified = await verify_backup(backup_id)
+    return {"backup_id": backup_id, "verified": verified}
+
+
+@app.post("/api/ops/drill/run")
+async def ops_run_drill() -> dict:
+    drill = await run_dr_drill()
+    return drill.model_dump()
+
+
+@app.get("/api/ops/incidents")
+async def ops_list_incidents(status: str | None = None) -> list[dict]:
+    if status == "OPEN":
+        incidents = await get_open_incidents()
+    else:
+        from database import list_alert_events
+        incidents = await list_alert_events(acknowledged=False)
+    return [i.model_dump() for i in incidents]
+
+
+@app.post("/api/ops/incidents/{incident_id}/mitigate")
+async def ops_mitigate_incident(incident_id: str, action: str) -> dict:
+    incident = await mitigate_incident(incident_id, action)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return incident.model_dump()
+
+
+@app.post("/api/ops/incidents/{incident_id}/resolve")
+async def ops_resolve_incident(incident_id: str) -> dict:
+    incident = await resolve_incident(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return incident.model_dump()
+
+
+@app.post("/api/ops/watchdog/tick")
+async def ops_watchdog_tick() -> dict:
+    incidents = await watchdog_check()
+    return {"incidents_found": len(incidents), "incidents": [i.model_dump() for i in incidents]}
 

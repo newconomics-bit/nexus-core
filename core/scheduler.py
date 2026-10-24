@@ -4,6 +4,8 @@ from database import (
     update_approval_status,
     get_contracts_nearing_expiry,
     get_expired_contracts,
+    get_last_backup_date,
+    get_last_drill_date,
 )
 from agents.payment_verification import expire_old_qris
 from agents.daily_report import send_daily_report
@@ -11,6 +13,7 @@ from agents.proactive_alerts import scan_alert_triggers, alert_project_blocked
 from agents.sop_performance_review import schedule_monthly_review
 from agents.contract_generator import expire_contract
 from agents.customer_success import check_onboarding_progress, check_client_health_all
+from agents.disaster_recovery import run_backup, watchdog_check, run_dr_drill
 from core.telegram_bot import send_message
 
 
@@ -133,6 +136,35 @@ async def run_scheduler_tick() -> dict:
         except Exception as e:
             print(f"Weekly health check failed: {e}")
 
+    # Daily backup at 02:00
+    backup_result = None
+    last_backup_str = await get_last_backup_date()
+    now = datetime.now(timezone.utc)
+    if not last_backup_str or now.hour == 2:
+        try:
+            from agents.disaster_recovery import run_backup
+            backup_result = await run_backup()
+        except Exception as e:
+            print(f"Backup failed: {e}")
+
+    # Watchdog check (every tick)
+    watchdog_results = []
+    try:
+        from agents.disaster_recovery import watchdog_check
+        watchdog_results = await watchdog_check()
+    except Exception as e:
+        print(f"Watchdog check failed: {e}")
+
+    # Quarterly DR drill (every 90 days)
+    drill_result = None
+    last_drill_str = await get_last_drill_date()
+    if not last_drill_str or (datetime.now(timezone.utc) - datetime.fromisoformat(last_drill_str.replace("Z", "+00:00"))).days >= 90:
+        try:
+            from agents.disaster_recovery import run_dr_drill
+            drill_result = await run_dr_drill()
+        except Exception as e:
+            print(f"DR drill failed: {e}")
+
     # Monthly review on 1st of month at 09:00
     now = datetime.now(timezone.utc)
     monthly_result = None
@@ -148,6 +180,9 @@ async def run_scheduler_tick() -> dict:
         "contract_escalations": escalation_results,
         "onboarding_progress": onboarding_results,
         "weekly_health_scores": weekly_health_results,
+        "backup": backup_result.model_dump() if backup_result else None,
+        "watchdog": watchdog_results,
+        "drill": drill_result.model_dump() if drill_result else None,
         "monthly_review": monthly_result,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

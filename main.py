@@ -8,6 +8,15 @@ from fastapi.responses import JSONResponse
 import database
 from agents.daily_report import send_daily_report, generate_daily_report, format_report_text
 from agents.proactive_alerts import scan_alert_triggers
+from agents.customer_success import (
+    generate_onboarding,
+    complete_onboarding_item,
+    check_onboarding_progress,
+    triage_ticket,
+    resolve_ticket,
+    compute_health_score,
+    check_client_health_all,
+)
 from agents.contract_generator import generate_contract, send_contract, mark_contract_signed
 from agents.sop_pricing import evaluate_pricing_change, process_pricing_change
 from agents.sop_feature_request import evaluate_feature_request
@@ -43,6 +52,7 @@ from database import (
     get_pending_contracts,
     get_contracts_nearing_expiry,
     get_expired_contracts,
+    get_active_client_projects,
     init_db,
     list_pending_approvals,
     save_approval,
@@ -64,6 +74,16 @@ from database import (
     save_agent_performance,
     get_agent_performance_last_30_days,
     save_contract,
+    get_onboarding_plan,
+    save_onboarding_plan,
+    update_onboarding_item,
+    get_support_ticket,
+    list_support_tickets,
+    save_support_ticket,
+    save_client_health,
+    get_client_health,
+    list_client_health,
+    get_active_client_projects,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -90,6 +110,9 @@ from models import (
     Invoice,
     InvoiceStatus,
     MockLedgerEntry,
+    OnboardingPlan,
+    OnboardingItem,
+    OnboardingItemStatus,
     ProjectSpec,
     ProjectState,
     QrisRequest,
@@ -99,6 +122,8 @@ from models import (
     StartProjectRequest,
     Subscription,
     SubscriptionStatus,
+    SupportTicket,
+    TicketStatus,
     TaskKind,
     TaskStatus,
     TechnicalDecision,
@@ -110,6 +135,10 @@ from models import (
     Contract,
     ContractType,
     ContractStatus,
+    ClientHealth,
+    SupportTicket,
+    TicketCategory,
+    TicketStatus,
 )
 
 
@@ -843,4 +872,59 @@ async def legal_get_contract(contract_id: str) -> dict:
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
     return contract.model_dump()
+
+
+# Customer Success Endpoints
+@app.post("/api/cs/onboarding/generate")
+async def cs_generate_onboarding(project_id: str) -> dict:
+    plan = await generate_onboarding(project_id)
+    return plan.model_dump()
+
+
+@app.get("/api/cs/onboarding/{project_id}")
+async def cs_get_onboarding(project_id: str) -> dict:
+    plan = await get_onboarding_plan(project_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Onboarding plan not found")
+    return plan.model_dump()
+
+
+@app.post("/api/cs/onboarding/{project_id}/items/{item_id}/complete")
+async def cs_complete_onboarding_item(project_id: str, item_id: str) -> dict:
+    item = await complete_onboarding_item(project_id, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return item.model_dump()
+
+
+@app.post("/api/support/ticket")
+async def cs_create_ticket(project_id: str, description: str) -> dict:
+    ticket = await triage_ticket(project_id, description)
+    return ticket.model_dump()
+
+
+@app.get("/api/support/tickets")
+async def cs_list_tickets(status: str | None = None, project_id: str | None = None) -> list[dict]:
+    tickets = await list_support_tickets(project_id=project_id, status=status)
+    return [t.model_dump() for t in tickets]
+
+
+@app.post("/api/support/tickets/{ticket_id}/resolve")
+async def cs_resolve_ticket(ticket_id: str) -> dict:
+    ticket = await resolve_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return ticket.model_dump()
+
+
+@app.get("/api/cs/health-scores")
+async def cs_health_scores(flagged: bool | None = None) -> list[dict]:
+    health_scores = await list_client_health(flagged=flagged)
+    return [h.model_dump() for h in health_scores]
+
+
+@app.post("/api/cs/health-score/{project_id}")
+async def cs_compute_health(project_id: str) -> dict:
+    health = await compute_health_score(project_id)
+    return health.model_dump()
 

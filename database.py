@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth
 
 DB_PATH = "rakitdigital.db"
 
@@ -15,7 +15,8 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
                 client_name TEXT NOT NULL,
-                state TEXT NOT NULL
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -23,6 +24,8 @@ async def init_db() -> None:
         columns = {row[1] for row in await cursor.fetchall()}
         if "spec_json" not in columns:
             await db.execute("ALTER TABLE projects ADD COLUMN spec_json TEXT")
+        if "created_at" not in columns:
+            await db.execute("ALTER TABLE projects ADD COLUMN created_at TEXT")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS quotes (
@@ -318,12 +321,52 @@ async def init_db() -> None:
         )
         await db.commit()
 
-
-async def create_project(project_id: str, client_name: str, state: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO projects (id, client_name, state) VALUES (?, ?, ?)",
-            (project_id, client_name, state),
+            """
+            CREATE TABLE IF NOT EXISTS onboarding_plans (
+                plan_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                items_json TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                ticket_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL,
+                auto_answered INTEGER NOT NULL DEFAULT 0,
+                answer TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS client_health (
+                project_id TEXT PRIMARY KEY,
+                score INTEGER NOT NULL,
+                factors_json TEXT NOT NULL,
+                flagged INTEGER NOT NULL DEFAULT 0,
+                computed_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+
+async def create_project(project_id: str, client_name: str, state: str) -> None:
+    from datetime import datetime, timezone
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO projects (id, client_name, state, created_at) VALUES (?, ?, ?, ?)",
+            (project_id, client_name, state, datetime.now(timezone.utc).isoformat()),
         )
         await db.commit()
 
@@ -332,7 +375,7 @@ async def get_project(project_id: str) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT id, client_name, state, spec_json FROM projects WHERE id = ?",
+            "SELECT id, client_name, state, spec_json, created_at FROM projects WHERE id = ?",
             (project_id,),
         )
         row = await cursor.fetchone()
@@ -343,6 +386,7 @@ async def get_project(project_id: str) -> dict | None:
             "client_name": row["client_name"],
             "state": row["state"],
             "spec_json": row["spec_json"],
+            "created_at": row["created_at"],
         }
 
 
@@ -1787,3 +1831,227 @@ async def list_alert_events(acknowledged: bool | None = None) -> list[AlertEvent
         cursor = await db.execute(query, params)
         rows = await cursor.fetchall()
         return [_row_to_alert_event(row) for row in rows]
+
+
+async def get_active_client_projects() -> list[dict]:
+    """Get all active client projects (SUBSCRIPTION or DEPLOYED state)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, client_name, state, created_at FROM projects WHERE state IN ('SUBSCRIPTION', 'DEPLOYED')"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def _row_to_onboarding_plan(row: aiosqlite.Row) -> OnboardingPlan:
+    import json
+    return OnboardingPlan.model_validate(
+        {
+            "plan_id": row["plan_id"],
+            "project_id": row["project_id"],
+            "created_at": row["created_at"],
+            "items": json.loads(row["items_json"]),
+        }
+    )
+
+
+async def save_onboarding_plan(plan: OnboardingPlan) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO onboarding_plans (
+                plan_id, project_id, created_at, items_json
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(plan_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                created_at = excluded.created_at,
+                items_json = excluded.items_json
+            """,
+            (
+                plan.plan_id,
+                plan.project_id,
+                plan.created_at,
+                json.dumps([item.model_dump(mode="json") for item in plan.items]),
+            ),
+        )
+        await db.commit()
+
+
+async def get_onboarding_plan(project_id: str) -> OnboardingPlan | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM onboarding_plans WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+            (project_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_onboarding_plan(row)
+
+
+async def update_onboarding_item(item_id: str, status: str, completed_at: str | None = None) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM onboarding_plans WHERE items_json LIKE ?",
+            (f"%{item_id}%",),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+        plan = _row_to_onboarding_plan(row)
+        for item in plan.items:
+            if item.item_id == item_id:
+                item.status = OnboardingItemStatus(status)
+                if completed_at:
+                    item.completed_at = completed_at
+                break
+        await save_onboarding_plan(plan)
+
+
+def _row_to_support_ticket(row: aiosqlite.Row) -> SupportTicket:
+    return SupportTicket.model_validate(
+        {
+            "ticket_id": row["ticket_id"],
+            "project_id": row["project_id"],
+            "category": row["category"],
+            "description": row["description"],
+            "status": row["status"],
+            "auto_answered": bool(row["auto_answered"]),
+            "answer": row["answer"],
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+        }
+    )
+
+
+async def save_support_ticket(ticket: SupportTicket) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO support_tickets (
+                ticket_id, project_id, category, description, status,
+                auto_answered, answer, created_at, resolved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticket_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                category = excluded.category,
+                description = excluded.description,
+                status = excluded.status,
+                auto_answered = excluded.auto_answered,
+                answer = excluded.answer,
+                created_at = excluded.created_at,
+                resolved_at = excluded.resolved_at
+            """,
+            (
+                ticket.ticket_id,
+                ticket.project_id,
+                ticket.category.value,
+                ticket.description,
+                ticket.status.value,
+                int(ticket.auto_answered),
+                ticket.answer,
+                ticket.created_at,
+                ticket.resolved_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_support_ticket(ticket_id: str) -> SupportTicket | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM support_tickets WHERE ticket_id = ?",
+            (ticket_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_support_ticket(row)
+
+
+async def list_support_tickets(project_id: str | None = None, status: str | None = None) -> list[SupportTicket]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT * FROM support_tickets WHERE 1=1"
+        params = []
+        if project_id:
+            query += " AND project_id = ?"
+            params.append(project_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC"
+        cursor = await db.execute(query, tuple(params))
+        rows = await cursor.fetchall()
+        return [_row_to_support_ticket(row) for row in rows]
+
+
+def _row_to_client_health(row: aiosqlite.Row) -> ClientHealth:
+    import json
+    return ClientHealth.model_validate(
+        {
+            "project_id": row["project_id"],
+            "score": row["score"],
+            "factors": json.loads(row["factors_json"]),
+            "flagged": bool(row["flagged"]),
+            "computed_at": row["computed_at"],
+        }
+    )
+
+
+async def save_client_health(health: ClientHealth) -> None:
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO client_health (
+                project_id, score, factors_json, flagged, computed_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                score = excluded.score,
+                factors_json = excluded.factors_json,
+                flagged = excluded.flagged,
+                computed_at = excluded.computed_at
+            """,
+            (
+                health.project_id,
+                health.score,
+                json.dumps(health.factors),
+                int(health.flagged),
+                health.computed_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_client_health(project_id: str) -> ClientHealth | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM client_health WHERE project_id = ?",
+            (project_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_client_health(row)
+
+
+async def list_client_health(flagged: bool | None = None) -> list[ClientHealth]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT * FROM client_health WHERE 1=1"
+        params = []
+        if flagged is not None:
+            query += " AND flagged = ?"
+            params.append(int(flagged))
+        query += " ORDER BY computed_at DESC"
+        cursor = await db.execute(query, tuple(params))
+        rows = await cursor.fetchall()
+        return [_row_to_client_health(row) for row in rows]

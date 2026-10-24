@@ -443,3 +443,56 @@ class Contract(BaseModel):
     created_at: str
     client_email: str | None = None
 
+
+class OnboardingItemStatus(str, Enum):
+    PENDING = "PENDING"
+    DONE = "DONE"
+    SKIPPED = "SKIPPED"
+
+
+class OnboardingItem(BaseModel):
+    item_id: str
+    label: str
+    due_day: int
+    status: OnboardingItemStatus = OnboardingItemStatus.PENDING
+    completed_at: str | None = None
+
+
+class OnboardingPlan(BaseModel):
+    plan_id: str
+    project_id: str
+    created_at: str
+    items: list[OnboardingItem]
+
+
+class TicketCategory(str, Enum):
+    FAQ = "FAQ"
+    TECHNICAL = "TECHNICAL"
+    BILLING = "BILLING"
+
+
+class TicketStatus(str, Enum):
+    OPEN = "OPEN"
+    RESOLVED = "RESOLVED"
+    ESCALATED = "ESCALATED"
+
+
+class SupportTicket(BaseModel):
+    ticket_id: str
+    project_id: str
+    category: TicketCategory
+    description: str
+    status: TicketStatus = TicketStatus.OPEN
+    auto_answered: bool = False
+    answer: str | None = None
+    created_at: str
+    resolved_at: str | None = None
+
+
+class ClientHealth(BaseModel):
+    project_id: str
+    score: int
+    factors: dict
+    flagged: bool
+    computed_at: str
+

@@ -1,6 +1,7 @@
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pydantic import BaseModel
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse
@@ -43,11 +44,14 @@ from agents.sop_knowledge_mgmt import evaluate_prompt_update, process_prompt_upd
 from agents.text_quality_gate import score_text
 from agents.visual_quality_gate import audit_frontend
 from agents.cs_intake import run_discovery
+from agents.client_copilot import generate_business_insight
+from core.consultation_matrix import calculate_quote as consultation_calculate_quote
 from agents.finance_costing import (
     DiscountHardCap,
     apply_discount,
-    calculate_quote,
+    calculate_quote as finance_calculate_quote,
     estimate_effort,
+)
 
 # In-memory lock for state transitions (single-process deployment)
 _state_transition_locks: dict[str, float] = {}
@@ -72,7 +76,7 @@ def _acquire_state_lock(project_id: str) -> bool:
 def _release_state_lock(project_id: str) -> None:
     """Release the state transition lock for this project."""
     _state_transition_locks.pop(project_id, None)
-)
+
 from agents.payment_verification import generate_qris, handle_qris_webhook, VerificationResult
 from agents.post_mortem import run_post_mortem
 from core.prompt_injector import inject_memory
@@ -162,6 +166,10 @@ from database import (
     abort_drill,
     update_drill_summary,
     get_red_team_db,
+    save_custom_request,
+    get_custom_request,
+    list_custom_requests,
+    update_custom_request_status,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -235,6 +243,8 @@ from models import (
     DrillTrigger,
     RedTeamDrillStatus,
     RedTeamDrill,
+    CustomRequest,
+    CustomRequestStatus,
 )
 
 
@@ -318,7 +328,7 @@ async def generate_project_quote(project_id: str):
         raise HTTPException(status_code=400, detail="Project spec is missing")
 
     spec = ProjectSpec.model_validate_json(project["spec_json"])
-    quote = await calculate_quote(project_id, spec, estimate_effort(spec))
+    quote = await finance_calculate_quote(project_id, spec, estimate_effort(spec))
     latest = await get_latest_quote(project_id)
     if latest is not None and latest.status == QuoteStatus.ACTIVE:
         await save_quote(latest.model_copy(update={"status": QuoteStatus.EXPIRED}))
@@ -1359,5 +1369,116 @@ async def redteam_latest_drill() -> dict:
         "finished_at": drill.finished_at,
         "summary": drill.summary,
         "results": [r.model_dump() for r in drill.results],
+    }
+
+
+# ==================== WAVE 24: CONSULTATIVE & CO-PILOT ENDPOINTS ====================
+
+class CopilotInsightRequest(BaseModel):
+    structured_data: dict
+
+
+@app.post("/api/copilot/insight")
+async def copilot_insight(body: CopilotInsightRequest) -> dict:
+    """
+    Client Co-Pilot: Generate business insight from structured data.
+    Protected by API key + client auth (simplified: API key only for now).
+    """
+    insight = await generate_business_insight(body.structured_data)
+    return {"insight": insight, "generated_at": datetime.now(timezone.utc).isoformat()}
+
+
+class CustomRequestCreate(BaseModel):
+    client_name: str
+    description: str
+    estimated_budget: int | None = None
+
+
+@app.post("/api/custom-requests")
+async def create_custom_request(body: CustomRequestCreate) -> dict:
+    """Create a new custom/enterprise request."""
+    import uuid
+    request_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    
+    request = CustomRequest(
+        request_id=request_id,
+        client_name=body.client_name,
+        description=body.description,
+        status=CustomRequestStatus.PENDING_REVIEW,
+        estimated_budget=body.estimated_budget,
+        created_at=now,
+    )
+    await save_custom_request(request)
+    
+    return {
+        "request_id": request_id,
+        "status": "PENDING_REVIEW",
+        "message": "Custom request created. Tim arsitek akan review 1x24 jam.",
+    }
+
+
+@app.get("/api/custom-requests")
+async def get_custom_requests(status: str | None = None) -> list[dict]:
+    """List custom requests, optionally filtered by status."""
+    status_enum = CustomRequestStatus(status) if status else None
+    requests = await list_custom_requests(status_enum)
+    return [r.model_dump() for r in requests]
+
+
+@app.get("/api/custom-requests/{request_id}")
+async def get_custom_request_endpoint(request_id: str) -> dict:
+    """Get a specific custom request."""
+    request = await get_custom_request(request_id)
+    if not request:
+        raise HTTPException(status_code=404, detail="Custom request not found")
+    return request.model_dump()
+
+
+class CustomRequestUpdate(BaseModel):
+    status: str
+    estimated_budget: int | None = None
+
+
+@app.patch("/api/custom-requests/{request_id}")
+async def update_custom_request(request_id: str, body: CustomRequestUpdate) -> dict:
+    """Update custom request status."""
+    status_enum = CustomRequestStatus(body.status)
+    success = await update_custom_request_status(request_id, status_enum, body.estimated_budget)
+    if not success:
+        raise HTTPException(status_code=404, detail="Custom request not found")
+    return {"message": "Updated", "request_id": request_id}
+
+
+class QuoteCalculateRequest(BaseModel):
+    base_tier: str
+    modules: list[str] = []
+
+
+class ConsultationDetectRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/quote/calculate")
+async def calculate_quote_endpoint(body: QuoteCalculateRequest) -> dict:
+    """Calculate quote deterministically (for internal/debug use)."""
+    quote = consultation_calculate_quote(body.base_tier, body.modules)
+    return quote
+
+
+@app.post("/api/consultation/detect")
+async def detect_business_type_endpoint(body: ConsultationDetectRequest) -> dict:
+    """Detect business type and return consultative response (for testing)."""
+    from core.consultation_matrix import detect_business_type, generate_consultative_response, get_recommended_config
+    btype = detect_business_type(body.message)
+    if not btype:
+        return {"detected": False, "message": "Tipe bisnis tidak dikenali"}
+    response = generate_consultative_response(btype)
+    config = get_recommended_config(btype)
+    return {
+        "detected": True,
+        "business_type": btype,
+        "consultative_response": response,
+        "recommended_config": config,
     }
 

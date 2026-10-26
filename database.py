@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus, AuditLog, AuditAction, AuditResult, AttackScenario, AttackStatus, AttackSeverity, AttackResult, DrillTrigger, RedTeamDrill, RedTeamDrillStatus
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus, AuditLog, AuditAction, AuditResult, AttackScenario, AttackStatus, AttackSeverity, AttackResult, DrillTrigger, RedTeamDrill, RedTeamDrillStatus, CustomRequest, CustomRequestStatus
 
 DB_PATH = "rakitdigital.db"
 TEST_ATTACK_DB_PATH = "test_attack.db"
@@ -400,6 +400,19 @@ async def init_db() -> None:
                 finished_at TEXT NOT NULL,
                 status TEXT NOT NULL,
                 notes TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS custom_requests (
+                request_id TEXT PRIMARY KEY,
+                client_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL,
+                estimated_budget INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT
             )
             """
         )
@@ -3259,6 +3272,114 @@ async def update_drill_summary(drill_id: str, summary: str, status: RedTeamDrill
             ),
         )
         await db.commit()
+
+
+# ==================== CUSTOM REQUESTS (WAVE 24) ====================
+
+async def save_custom_request(request: CustomRequest) -> None:
+    """Save a custom request to the database."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO custom_requests (
+                request_id, client_name, description, status, estimated_budget, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(request_id) DO UPDATE SET
+                client_name = excluded.client_name,
+                description = excluded.description,
+                status = excluded.status,
+                estimated_budget = excluded.estimated_budget,
+                updated_at = excluded.updated_at
+            """,
+            (
+                request.request_id,
+                request.client_name,
+                request.description,
+                request.status.value,
+                request.estimated_budget,
+                request.created_at,
+                request.updated_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_custom_request(request_id: str) -> CustomRequest | None:
+    """Get a custom request by ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM custom_requests WHERE request_id = ?",
+            (request_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return CustomRequest(
+            request_id=row["request_id"],
+            client_name=row["client_name"],
+            description=row["description"],
+            status=CustomRequestStatus(row["status"]),
+            estimated_budget=row["estimated_budget"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+async def list_custom_requests(status: CustomRequestStatus | None = None) -> list[CustomRequest]:
+    """List all custom requests, optionally filtered by status."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if status:
+            cursor = await db.execute(
+                "SELECT * FROM custom_requests WHERE status = ? ORDER BY created_at DESC",
+                (status.value,),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM custom_requests ORDER BY created_at DESC"
+            )
+        rows = await cursor.fetchall()
+        return [
+            CustomRequest(
+                request_id=row["request_id"],
+                client_name=row["client_name"],
+                description=row["description"],
+                status=CustomRequestStatus(row["status"]),
+                estimated_budget=row["estimated_budget"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+
+async def update_custom_request_status(
+    request_id: str, status: CustomRequestStatus, estimated_budget: int | None = None
+) -> bool:
+    """Update custom request status and optionally estimated budget."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if estimated_budget is not None:
+            cursor = await db.execute(
+                "UPDATE custom_requests SET status = ?, estimated_budget = ?, updated_at = ? WHERE request_id = ?",
+                (
+                    status.value,
+                    estimated_budget,
+                    datetime.now(timezone.utc).isoformat(),
+                    request_id,
+                ),
+            )
+        else:
+            cursor = await db.execute(
+                "UPDATE custom_requests SET status = ?, updated_at = ? WHERE request_id = ?",
+                (
+                    status.value,
+                    datetime.now(timezone.utc).isoformat(),
+                    request_id,
+                ),
+            )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 # Isolated DB connection for red team attacks

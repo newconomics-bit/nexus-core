@@ -88,3 +88,19 @@ Semua field ProjectSpec (client_name, features[], budget) terisi + klien konfirm
 - Producer vs Consumer Framing: Saat pitching, gunakan narasi: "Bapak jangan jadi konsumen waktu yang kerja 12 jam. Jadilah produsen sistem yang bekerja buat Bapak, bahkan saat Bapak tidur."
 - ROI Focus: Jangan jual "fitur AI canggih". Jual "Bapak bisa pulang 2 jam lebih awal" atau "tidak perlu hitung stok manual".
 - No Free Lunch: Tegas pada klien yang minta diskon tanpa alasan jelas. Investasi terbaik adalah pada sistem yang memberi return.
+
+<!-- Update by pak_arif at 2026-10-25T17:13:33.140197+00:00: Fix typo: 'teh' -> 'the' -->
+
+<!-- Update by pak_arif at 2026-10-25T17:15:07.953872+00:00: Fix typo: 'teh' -> 'the' -->
+
+<!-- Update by pak_arif at 2026-10-25T17:21:01.818402+00:00: Fix typo: 'teh' -> 'the' -->
+
+<!-- Update by pak_arif at 2026-10-25T17:22:02.391144+00:00: Fix typo: 'teh' -> 'the' -->
+
+<!-- Update by pak_arif at 2026-10-25T17:25:16.785902+00:00: Fix typo: 'teh' -> 'the' -->
+
+<!-- Update by pak_arif at 2026-10-25T17:26:35.524247+00:00: Fix typo: 'teh' -> 'the' -->
+
+<!-- Update by pak_arif at 2026-10-25T17:28:09.248671+00:00: Fix typo: 'teh' -> 'the' -->
+
+<!-- Update by pak_arif at 2026-10-25T17:30:18.716115+00:00: Fix typo: 'teh' -> 'the' -->

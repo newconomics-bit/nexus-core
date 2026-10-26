@@ -4,10 +4,16 @@ import re
 import asyncio
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+import httpx
 
 load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# LLM Configuration
+PRIMARY_MODEL = "deepseek/deepseek-chat-v3-0324"  # DeepSeek V3 (cheap)
+BACKUP_MODEL = "qwen/qwen-2.5-72b-instruct"  # Qwen backup via OpenRouter
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"  # Groq for Qwen backup
 
 # Circuit breaker for LLM calls
 _circuit_breaker_state = {
@@ -80,11 +86,8 @@ def _mock_reply(user_message: str) -> str:
     return f"Oke Bang, saya catat requirement-nya.\n```json\n{payload}\n```"
 
 
-async def call_llm(model: str, system_prompt: str, user_message: str) -> str:
-    # Check circuit breaker
-    if not await _check_circuit_breaker():
-        raise Exception("Circuit breaker open - too many failures")
-    
+async def _call_openrouter(model: str, system_prompt: str, user_message: str) -> str:
+    """Call OpenRouter API with given model."""
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         result = _mock_reply(user_message)
@@ -106,3 +109,59 @@ async def call_llm(model: str, system_prompt: str, user_message: str) -> str:
     except Exception as e:
         _record_failure()
         raise
+
+
+async def _call_groq(model: str, system_prompt: str, user_message: str) -> str:
+    """Call Groq API with given model (for Qwen backup)."""
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        result = _mock_reply(user_message)
+        _record_success()
+        return result
+
+    client = AsyncOpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
+    try:
+        completion = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        content = completion.choices[0].message.content
+        _record_success()
+        return content or ""
+    except Exception as e:
+        _record_failure()
+        raise
+
+
+async def call_llm(model: str, system_prompt: str, user_message: str) -> str:
+    """
+    Multi-LLM Fallback Gateway:
+    1. Try Primary (DeepSeek V3 via OpenRouter)
+    2. On failure (rate limit, timeout, API error), fallback to Backup (Qwen via Groq)
+    """
+    # Check circuit breaker
+    if not await _check_circuit_breaker():
+        raise Exception("Circuit breaker open - too many failures")
+    
+    # Primary: DeepSeek V3
+    try:
+        print(f"[LLM] Calling primary model: {PRIMARY_MODEL}")
+        result = await _call_openrouter(PRIMARY_MODEL, system_prompt, user_message)
+        print(f"[LLM] Primary succeeded")
+        return result
+    except Exception as e:
+        print(f"[LLM] Primary failed: {e}. Switching to backup...")
+        
+        # Fallback: Qwen via Groq
+        try:
+            print(f"[LLM] Calling backup model: {BACKUP_MODEL} via Groq")
+            result = await _call_groq(BACKUP_MODEL, system_prompt, user_message)
+            print(f"[LLM] Backup succeeded")
+            return result
+        except Exception as e2:
+            print(f"[LLM] Backup also failed: {e2}")
+            _record_failure()
+            raise Exception(f"Both primary and backup LLM failed: {e2}")

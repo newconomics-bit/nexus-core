@@ -1,12 +1,21 @@
 import re
 from pathlib import Path
+from datetime import datetime, timezone
+import uuid
 
 from pydantic import ValidationError
 
 from agents.text_quality_gate import enforce
 from core.llm_gateway import call_llm
 from core.pii_masker import mask_pii_in_text
-from models import ProjectSpec
+from core.consultation_matrix import (
+    detect_business_type,
+    is_enterprise_request,
+    generate_consultative_response,
+    get_recommended_config,
+)
+from database import save_custom_request
+from models import ProjectSpec, CustomRequest, CustomRequestStatus
 
 SARI_MODEL = "anthropic/claude-3.5-sonnet"
 _ANTI_SLOP_PATH = Path(__file__).resolve().parents[1] / "ANTI_SLOP_RULES.md"
@@ -15,20 +24,20 @@ _JSON_FENCE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
 # Prompt injection protection patterns
 _INJECTION_PATTERNS = [
-    r"(?i)ignore\s+(previous|all)\s+instructions?",
-    r"(?i)forget\s+(everything|previous|above)",
-    r"(?i)system\s+prompt",
-    r"(?i)you\s+are\s+now",
-    r"(?i)pretend\s+to\s+be",
-    r"(?i)roleplay\s+as",
-    r"(?i)output\s+(the\s+)?(system\s+)?prompt",
-    r"(?i)show\s+me\s+(the\s+)?(api\s+)?keys?",
-    r"(?i)reveal\s+(secrets?|passwords?)",
-    r"(?i)bypass\s+(security|auth)",
-    r"(?i)admin\s+mode",
-    r"(?i)developer\s+mode",
+    r"ignore\s+(previous|all)\s+instructions?",
+    r"forget\s+(everything|previous|above)",
+    r"system\s+prompt",
+    r"you\s+are\s+now",
+    r"pretend\s+to\s+be",
+    r"roleplay\s+as",
+    r"output\s+(the\s+)?(system\s+)?prompt",
+    r"show\s+me\s+(the\s+)?(api\s+)?keys?",
+    r"reveal\s+(secrets?|passwords?)",
+    r"bypass\s+(security|auth)",
+    r"admin\s+mode",
+    r"developer\s+mode",
 ]
-_INJECTION_REGEX = re.compile("|".join(_INJECTION_PATTERNS))
+_INJECTION_REGEX = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
 
 
 def _detect_prompt_injection(text: str) -> bool:
@@ -39,6 +48,52 @@ def _detect_prompt_injection(text: str) -> bool:
     if len(text) > 5000:
         return True
     return False
+
+
+def _handle_enterprise_request(project_id: str, client_message: str) -> dict:
+    """Handle RAKIT-CUSTOM / enterprise requests."""
+    request_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    
+    custom_request = CustomRequest(
+        request_id=request_id,
+        client_name="Unknown",  # Will be updated when client provides name
+        description=client_message,
+        status=CustomRequestStatus.PENDING_REVIEW,
+        estimated_budget=15_000_000,
+        created_at=now,
+    )
+    
+    # Save to database (fire and forget - don't await in mock)
+    import asyncio
+    asyncio.create_task(save_custom_request(custom_request))
+    
+    return {
+        "status": "CUSTOM_REQUEST_CREATED",
+        "reply": (
+            "Kode terverifikasi. Permintaan Anda diprioritaskan. "
+            "Tim Arsitek kami akan melakukan Feasibility Study 1x24 jam. "
+            "Estimasi awal mulai Rp 15.000.000. Setuju untuk diskusi teknis?"
+        ),
+        "custom_request_id": request_id,
+    }
+
+
+def _handle_standard_business(project_id: str, client_message: str) -> dict:
+    """Handle standard business types with consultative response."""
+    business_type = detect_business_type(client_message)
+    
+    if business_type:
+        response = generate_consultative_response(business_type)
+        if response["recognized"]:
+            return {
+                "status": "CONSULTATIVE_RESPONSE",
+                "reply": response["consultative_message"],
+                "business_type": business_type,
+                "recommended_config": get_recommended_config(business_type),
+            }
+    
+    return {"status": "NEED_MORE_INFO", "reply": "Halo Bang, bisnisnya apa ya? (cafe/salon/retail/distributor/restoran)"}
 
 
 def build_system_prompt() -> str:
@@ -90,6 +145,16 @@ async def run_discovery(project_id: str, client_message: str, db_session) -> dic
         safe_reply = "Halo Bang, pesan tidak bisa diproses. Coba kirim ulang dengan bahasa yang biasa ya."
         return {"status": "NEED_MORE_INFO", "reply": safe_reply}
     
+    # Check for RAKIT-CUSTOM / enterprise request FIRST
+    if is_enterprise_request(client_message):
+        return _handle_enterprise_request(project_id, client_message)
+    
+    # Check for standard business types (consultative response)
+    standard_response = _handle_standard_business(project_id, client_message)
+    if standard_response["status"] == "CONSULTATIVE_RESPONSE":
+        return standard_response
+    
+    # Fallback to LLM-based discovery for SPEC completion
     reply = await call_llm(SARI_MODEL, build_system_prompt(), client_message)
     # Apply text quality gate before sending to client
     clean_reply = _enforce_text_quality(reply)

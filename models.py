@@ -341,6 +341,7 @@ class AlertType(str, Enum):
     BACKUP_FAILED = "BACKUP_FAILED"
     DISK_FULL = "DISK_FULL"
     DRILL_FAILED = "DRILL_FAILED"
+    CUSTOM_REQUEST = "CUSTOM_REQUEST"
 
 
 class AlertSeverity(str, Enum):
@@ -786,6 +787,26 @@ class RedTeamDrill(BaseModel):
     summary: str = ""
 
 
-# Add RED_TEAM_FINDING to MemoryCategory
-# (MemoryCategory already exists above, we'll extend it by adding the new value)
+# ==================== WAVE 24: CONSULTATIVE & MODULAR ====================
+
+class CustomRequestStatus(str, Enum):
+    PENDING_REVIEW = "PENDING_REVIEW"
+    FEASIBILITY_STUDY = "FEASIBILITY_STUDY"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class CustomRequest(BaseModel):
+    request_id: str
+    client_name: str
+    description: str
+    status: CustomRequestStatus = CustomRequestStatus.PENDING_REVIEW
+    estimated_budget: int | None = None
+    created_at: str
+    updated_at: str | None = None
+
+
+# Add new values to existing enums
+# MemoryCategory already has RED_TEAM_FINDING from Wave 20/21
+# AlertType - add CUSTOM_REQUEST
 

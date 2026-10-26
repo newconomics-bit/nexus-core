@@ -4026,10 +4026,10 @@ def test_calculate_quote_deterministic():
     
     quote = calculate_quote("Paket Tumbuh", ["membership"])
     assert quote["base_tier"] == "Paket Tumbuh"
-    assert quote["base_setup_fee"] == 10_000_000
-    assert quote["base_monthly_fee"] == 1_000_000
-    assert quote["total_setup_fee"] == 11_500_000  # 10M + 1.5M
-    assert quote["total_monthly_fee"] == 1_050_000  # 1M + 50k
+    assert quote["base_setup_fee"] == 7_500_000
+    assert quote["base_monthly_fee"] == 250_000
+    assert quote["total_setup_fee"] == 9_000_000  # 7.5M + 1.5M
+    assert quote["total_monthly_fee"] == 300_000  # 250k + 50k
     assert len(quote["modules"]) == 1
     assert quote["modules"][0]["module"] == "membership"
 
@@ -4039,13 +4039,13 @@ def test_calculate_quote_multiple_modules():
     from core.consultation_matrix import calculate_quote
     
     quote = calculate_quote("Paket Jaya", ["membership", "kds", "staff_commission"])
-    assert quote["base_setup_fee"] == 20_000_000
-    assert quote["base_monthly_fee"] == 2_500_000
+    assert quote["base_setup_fee"] == 15_000_000
+    assert quote["base_monthly_fee"] == 500_000
     # membership: 1.5M setup + 50k monthly
     # kds: 2M setup + 100k monthly
     # staff_commission: 1.5M setup + 50k monthly
-    assert quote["total_setup_fee"] == 25_000_000
-    assert quote["total_monthly_fee"] == 2_700_000
+    assert quote["total_setup_fee"] == 20_000_000  # 15M + 1.5M + 2M + 1.5M
+    assert quote["total_monthly_fee"] == 700_000  # 500k + 50k + 100k + 50k
     assert len(quote["modules"]) == 3
 
 
@@ -4194,8 +4194,8 @@ def test_calculate_quote_endpoint(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["base_tier"] == "Paket Tumbuh"
-    assert data["total_setup_fee"] == 11_500_000
-    assert data["total_monthly_fee"] == 1_050_000
+    assert data["total_setup_fee"] == 9_000_000
+    assert data["total_monthly_fee"] == 300_000
 
 
 def test_consultation_detect_endpoint(client):

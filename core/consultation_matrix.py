@@ -106,27 +106,50 @@ BUSINESS_PATTERNS: dict[str, BusinessPattern] = {
 
 
 # ============================================================
-# PACKAGING TIERS - Deterministic base pricing
+# BASE TIERS — Deterministic base pricing (HARGA BAKU)
+# ============================================================
+
+BASE_TIERS: dict[str, dict] = {
+    "Paket Mulai": {
+        "setup_fee": 3_500_000,
+        "monthly_fee": 150_000,
+        "description": "Untuk usaha baru yang ingin tinggalkan buku catatan."
+    },
+    "Paket Tumbuh": {
+        "setup_fee": 7_500_000,
+        "monthly_fee": 250_000,
+        "description": "Untuk bisnis dengan 1-3 karyawan yang butuh kontrol stok dan multi-user."
+    },
+    "Paket Jaya": {
+        "setup_fee": 15_000_000,
+        "monthly_fee": 500_000,
+        "description": "Untuk bisnis mapan yang butuh margin real-time dan audit log granular."
+    }
+}
+
+
+# ============================================================
+# PACKAGE TIERS — Extended tier details (for UI/display)
 # ============================================================
 
 PACKAGE_TIERS: dict[str, dict] = {
     "Paket Mulai": {
-        "setup_fee": 5_000_000,
-        "monthly_fee": 500_000,
+        "setup_fee": 3_500_000,
+        "monthly_fee": 150_000,
         "features": ["Kasir Digital", "Stok Dasar", "Laporan Harian", "QRIS"],
         "max_users": 2,
         "support_level": "Email",
     },
     "Paket Tumbuh": {
-        "setup_fee": 10_000_000,
-        "monthly_fee": 1_000_000,
+        "setup_fee": 7_500_000,
+        "monthly_fee": 250_000,
         "features": ["Kasir Digital", "Stok Lanjutan", "Laporan Real-time", "QRIS", "Multi-User", "API Basic"],
         "max_users": 5,
         "support_level": "Email + Chat",
     },
     "Paket Jaya": {
-        "setup_fee": 20_000_000,
-        "monthly_fee": 2_500_000,
+        "setup_fee": 15_000_000,
+        "monthly_fee": 500_000,
         "features": [
             "Semua fitur Tumbuh",
             "Margin Real-time per Item",
@@ -205,8 +228,13 @@ def get_business_pattern(business_type: str) -> BusinessPattern | None:
     return BUSINESS_PATTERNS.get(business_type.lower())
 
 
+def get_base_tier(tier_name: str) -> dict | None:
+    """Get base tier pricing from BASE_TIERS (deterministic pricing)."""
+    return BASE_TIERS.get(tier_name)
+
+
 def get_package_tier(tier_name: str) -> dict | None:
-    """Get package tier details."""
+    """Get package tier details (for UI/display)."""
     return PACKAGE_TIERS.get(tier_name)
 
 
@@ -289,8 +317,9 @@ def calculate_quote(base_tier: str, modules: list[str]) -> dict:
     """
     Calculate total quote deterministically.
     Returns dict with setup_fee, monthly_fee, breakdown.
+    Uses BASE_TIERS for deterministic pricing.
     """
-    tier = get_package_tier(base_tier)
+    tier = get_base_tier(base_tier)
     if not tier:
         raise ValueError(f"Unknown tier: {base_tier}")
 

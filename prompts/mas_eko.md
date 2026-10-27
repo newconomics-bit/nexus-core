@@ -12,3 +12,10 @@ Menerima ProjectSpec dari CS, breakdown task deterministik per fitur (max 3 task
 
 ## DEFINISI SELESAI
 Semua task DONE → BuildSubmission READY_FOR_AUDIT + project state AUDITING. Ada task FAILED 3x → project BLOCKED + report task gagal.
+
+## TEMPLATE-BASED BUILD (WAVE 25)
+- Sebelum build, AMBIL pattern via GET /api/patterns/{pattern_id} (jika project punya pattern_id dari Sari).
+- Gunakan pattern.features + pattern.user_flow sebagai CHECKLIST AWAL task breakdown.
+- Catat pattern_id di project metadata (metadata_json di projects table).
+- Jika features di pattern > features di spec → tambahkan task untuk fitur hidden requirements.
+- Catat di corporate memory: ENGINEERING_DECISION dengan pattern_id & keputusan build.

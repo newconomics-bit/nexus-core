@@ -15,3 +15,10 @@ Quote ACTIVE dengan quote_id, final_price, hpp_breakdown lengkap, margin_pct 75,
 ## FILOSOFI MINDSET LEGENDA: WARREN BUFFETT
 - Margin of Safety: Selalu hitung ulang HPP. Jika margin proyek < 60%, WAJIB reject atau eskalasi ke Founder.
 - Toll Bridge Thinking: Prioritaskan fitur yang meningkatkan switching cost klien (recurring revenue), bukan fitur kosmetik.
+
+## PATTERN-BASED ESTIMATE VALIDATION (WAVE 25)
+- Saat generate quote, AMBIL pattern via GET /api/patterns?business_type=XXX.
+- Jika quoted hours (dari Mas Eko estimate) menyimpang >40% dari pattern.estimated_build_hours untuk business_type sama → FLAG review manual.
+- Flag = buat ApprovalRequest type PRICING_CHANGE dengan payload {pattern_id, deviation_pct, notes}.
+- Catat di corporate memory: FINANCE_MARGIN_LEAK dengan pattern_id & deviation.
+- Referensi: pattern.estimated_build_hours adalah baseline, bukan aturan mutlak.

@@ -14,8 +14,13 @@ from core.consultation_matrix import (
     generate_consultative_response,
     get_recommended_config,
 )
-from database import save_custom_request
-from models import ProjectSpec, CustomRequest, CustomRequestStatus
+from core.curriculum import CURRICULUM_SOURCES
+from database import (
+    save_custom_request,
+    search_patterns,
+    create_learning_task,
+)
+from models import ProjectSpec, CustomRequest, CustomRequestStatus, LearningTask, LearningTaskStatus
 
 SARI_MODEL = "anthropic/claude-3.5-sonnet"
 _ANTI_SLOP_PATH = Path(__file__).resolve().parents[1] / "ANTI_SLOP_RULES.md"
@@ -79,19 +84,67 @@ def _handle_enterprise_request(project_id: str, client_message: str) -> dict:
     }
 
 
-def _handle_standard_business(project_id: str, client_message: str) -> dict:
-    """Handle standard business types with consultative response."""
+async def _handle_standard_business(project_id: str, client_message: str) -> dict:
+    """Handle standard business types with consultative response + pattern search."""
     business_type = detect_business_type(client_message)
+    
+    # Search for relevant patterns based on client message
+    patterns = []
+    try:
+        patterns = await search_patterns(client_message, top_k=1)
+    except Exception:
+        patterns = []
     
     if business_type:
         response = generate_consultative_response(business_type)
         if response["recognized"]:
+            # Enhance with pattern match if found
+            pattern_info = ""
+            if patterns:
+                p = patterns[0]
+                hidden_feats = list(p.features.keys())[:3]
+                pattern_info = (
+                    f"\n\nKami sudah memahami pola sistem seperti {p.reference_company}. "
+                    f"Biasanya butuh integrasi {', '.join(hidden_feats)}. "
+                    f"Estimasi build: {p.estimated_build_hours} jam. "
+                    f"Kakak mau sekalian kami bikinkan custom dengan value yang jelas?"
+                )
+            
             return {
                 "status": "CONSULTATIVE_RESPONSE",
-                "reply": response["consultative_message"],
+                "reply": response["consultative_message"] + pattern_info,
                 "business_type": business_type,
                 "recommended_config": get_recommended_config(business_type),
+                "matched_pattern": patterns[0].pattern_id if patterns else None,
             }
+    
+    # If no business type detected but client mentions a reference (kayak X, seperti X, mirip X)
+    reference_keywords = ["kayak", "seperti", "mirip", "referensi", "contoh"]
+    if any(kw in client_message.lower() for kw in reference_keywords):
+        # Create learning task for unknown reference
+        task_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        learning_task = LearningTask(
+            task_id=task_id,
+            target_url="",  # No URL yet, just reference
+            business_type="unknown",
+            reference_company=client_message[:100],
+            status=LearningTaskStatus.PENDING,
+            created_at=now,
+        )
+        try:
+            await create_learning_task(learning_task)
+        except Exception:
+            pass  # Silent fail for learning task creation
+        
+        return {
+            "status": "LEARNING_TASK_CREATED",
+            "reply": (
+                "Catatan khusus kami terima. Tim riset kami akan mempelajari pola tersebut "
+                "dan kembali dengan penawaran lengkap dalam 1x24 jam."
+            ),
+            "learning_task_id": task_id,
+        }
     
     return {"status": "NEED_MORE_INFO", "reply": "Halo Bang, bisnisnya apa ya? (cafe/salon/retail/distributor/restoran)"}
 
@@ -150,8 +203,8 @@ async def run_discovery(project_id: str, client_message: str, db_session) -> dic
         return _handle_enterprise_request(project_id, client_message)
     
     # Check for standard business types (consultative response)
-    standard_response = _handle_standard_business(project_id, client_message)
-    if standard_response["status"] == "CONSULTATIVE_RESPONSE":
+    standard_response = await _handle_standard_business(project_id, client_message)
+    if standard_response["status"] in ("CONSULTATIVE_RESPONSE", "LEARNING_TASK_CREATED"):
         return standard_response
     
     # Fallback to LLM-based discovery for SPEC completion

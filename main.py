@@ -45,6 +45,7 @@ from agents.text_quality_gate import score_text
 from agents.visual_quality_gate import audit_frontend
 from agents.cs_intake import run_discovery
 from agents.client_copilot import generate_business_insight
+from agents.web_learner import run_curriculum_batch, execute_learning_task
 from core.consultation_matrix import calculate_quote as consultation_calculate_quote
 from agents.finance_costing import (
     DiscountHardCap,
@@ -170,6 +171,15 @@ from database import (
     get_custom_request,
     list_custom_requests,
     update_custom_request_status,
+    get_active_patterns,
+    get_pattern_by_id,
+    search_patterns,
+    supersede_pattern,
+    create_learning_task,
+    get_pending_tasks,
+    get_learning_task,
+    update_learning_task,
+    seed_initial_patterns,
 )
 from models import (
     ALLOWED_TRANSITIONS,
@@ -245,6 +255,9 @@ from models import (
     RedTeamDrill,
     CustomRequest,
     CustomRequestStatus,
+    ClientPattern,
+    LearningTask,
+    LearningTaskStatus,
 )
 
 
@@ -1481,4 +1494,113 @@ async def detect_business_type_endpoint(body: ConsultationDetectRequest) -> dict
         "consultative_response": response,
         "recommended_config": config,
     }
+
+
+# ==================== WAVE 25: PATTERN & LEARNING ENDPOINTS ====================
+
+class PatternSearchRequest(BaseModel):
+    query: str
+    business_type: str | None = None
+    top_k: int = 5
+
+
+@app.get("/api/patterns")
+async def list_patterns(business_type: str | None = None) -> list[dict]:
+    """List active patterns, optionally filtered by business_type."""
+    patterns = await get_active_patterns(business_type)
+    return [p.model_dump() for p in patterns]
+
+
+@app.get("/api/patterns/search")
+async def search_patterns_endpoint(query: str, business_type: str | None = None, top_k: int = 5) -> list[dict]:
+    """Search patterns using keyword weighted scoring."""
+    patterns = await search_patterns(query, business_type, top_k)
+    return [p.model_dump() for p in patterns]
+
+
+@app.get("/api/patterns/{pattern_id}")
+async def get_pattern(pattern_id: str) -> dict:
+    """Get a specific pattern by ID."""
+    pattern = await get_pattern_by_id(pattern_id)
+    if not pattern:
+        raise HTTPException(status_code=404, detail="Pattern not found")
+    return pattern.model_dump()
+
+
+class LearningTaskCreate(BaseModel):
+    target_url: str
+    business_type: str
+    reference_company: str
+
+
+@app.post("/api/learning/tasks")
+async def create_learning_task_endpoint(body: LearningTaskCreate) -> dict:
+    """Create a new learning task (PENDING)."""
+    import uuid
+    from datetime import datetime, timezone
+    task_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    
+    task = LearningTask(
+        task_id=task_id,
+        target_url=body.target_url,
+        business_type=body.business_type,
+        reference_company=body.reference_company,
+        status=LearningTaskStatus.PENDING,
+        created_at=now,
+    )
+    await create_learning_task(task)
+    
+    return {
+        "task_id": task_id,
+        "status": "PENDING",
+        "message": "Learning task created. Execute via POST /api/learning/tasks/{task_id}/execute",
+    }
+
+
+@app.get("/api/learning/tasks")
+async def list_learning_tasks() -> list[dict]:
+    """List all pending learning tasks."""
+    tasks = await get_pending_tasks()
+    return [t.model_dump() for t in tasks]
+
+
+@app.post("/api/learning/tasks/{task_id}/execute")
+async def execute_learning_task_endpoint(task_id: str) -> dict:
+    """Execute a specific learning task by ID."""
+    result = await execute_learning_task(task_id)
+    return result
+
+
+class CurriculumRunRequest(BaseModel):
+    max_fetch: int = 1
+
+
+@app.post("/api/curriculum/run")
+async def run_curriculum_endpoint(body: CurriculumRunRequest) -> dict:
+    """
+    Trigger curriculum learning batch (Founder only).
+    Requires Founder approval via header X-Founder-Approval: true
+    """
+    # In production, verify Founder approval header
+    max_fetch = min(max(1, body.max_fetch), 5)  # Clamp 1-5
+    results = await run_curriculum_batch(max_fetch)
+    
+    # Send summary to Founder
+    from core.telegram_bot import send_message
+    completed = [r for r in results if r.get("status") == "COMPLETED"]
+    skipped = [r for r in results if r.get("status") == "SKIPPED_CACHED"]
+    failed = [r for r in results if r.get("status") in ("FAILED", "ETHICS_BLOCKED")]
+    
+    summary = (
+        f"📚 *PAK GURU CURRICULUM RUN*\n"
+        f"Fetch: {len(completed)} baru, {len(skipped)} cached, {len(failed)} gagal/blocked.\n"
+        f"Detail: {results}"
+    )
+    try:
+        await send_message(summary)
+    except Exception as e:
+        print(f"Failed to send curriculum summary: {e}")
+    
+    return {"results": results, "summary": summary}
 

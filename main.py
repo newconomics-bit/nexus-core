@@ -67,7 +67,7 @@ def _acquire_state_lock(project_id: str) -> bool:
     expired = [k for k, v in _state_transition_locks.items() if v < now]
     for k in expired:
         del _state_transition_locks[k]
-    
+
     if project_id in _state_transition_locks:
         return False
     _state_transition_locks[project_id] = now + _STATE_TRANSITION_LOCK_TTL
@@ -82,7 +82,7 @@ from agents.payment_verification import generate_qris, handle_qris_webhook, Veri
 from agents.post_mortem import run_post_mortem
 from core.prompt_injector import inject_memory
 from core.telegram_bot import send_approval_card, send_access_denied_message
-from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity
+from core.security import verify_api_key, verify_telegram_secret, verify_founder_identity, verify_founder_authorization
 from agents.red_team import RedTeamAttacker
 from core.scheduler import run_scheduler_tick, scheduled_red_team_drill
 from core.escalation_matrix import needs_founder_approval, get_escalation_matrix
@@ -298,7 +298,7 @@ async def advance_project(project_id: str, body: AdvanceStateRequest) -> dict:
             status_code=409,
             detail="State transition already in progress for this project. Please retry.",
         )
-    
+
     try:
         project = await get_project(project_id)
         if project is None:
@@ -589,7 +589,7 @@ async def build_run(project_id: str) -> dict:
 
     from agents.engineering_build import run_build
     submission = await run_build(project_id)
-    
+
     if submission.status.startswith("BLOCKED"):
         return {
             "status": "BLOCKED",
@@ -597,7 +597,7 @@ async def build_run(project_id: str) -> dict:
             "project_state": "BLOCKED",
             "submission": submission.model_dump(),
         }
-    
+
     return {
         "status": submission.status,
         "project_id": project_id,
@@ -1272,28 +1272,28 @@ async def red_team_middleware(request: Request, call_next):
         expected_key = os.getenv("RAKIT_API_KEY", "dev-secret-key-change-in-production")
         if api_key != expected_key:
             return JSONResponse(status_code=401, content={"detail": "Invalid API Key for Red Team mode"})
-        
+
         # Verify signature (simple HMAC for anti-spoof)
         signature = request.headers.get("X-Red-Team-Signature")
         if not signature:
             return JSONResponse(status_code=401, content={"detail": "Missing X-Red-Team-Signature"})
-        
+
         # For simplicity, verify signature matches expected pattern
         # In production, use proper HMAC with secret
         expected_signature = hashlib.sha256(f"redteam{api_key}".encode()).hexdigest()[:16]
         if signature != expected_signature:
             return JSONResponse(status_code=401, content={"detail": "Invalid Red Team signature"})
-        
+
         # Switch to isolated DB by setting request state
         request.state.red_team_mode = True
         request.state.red_team_db = await get_red_team_db()
-    
+
     response = await call_next(request)
-    
+
     # Close red team DB connection if opened
     if hasattr(request.state, "red_team_db"):
         await request.state.red_team_db.close()
-    
+
     return response
 
 
@@ -1308,15 +1308,15 @@ async def redteam_run_manual(request: Request) -> dict:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Founder authorization")
-    
+
     # Check if there's a pending approval for this drill
     # For manual trigger, we require a prior approval
     # This is a simplified check - in production, check for specific approval
     drill = await create_drill(DrillTrigger.MANUAL)
-    
+
     attacker = RedTeamAttacker()
     completed_drill = await attacker.run_all_scenarios(DrillTrigger.MANUAL)
-    
+
     # Send report to Founder via Telegram
     from core.telegram_bot import send_message
     report = attacker.generate_report(completed_drill, completed_drill.results)
@@ -1324,7 +1324,7 @@ async def redteam_run_manual(request: Request) -> dict:
         await send_message(f"🔴 *SI MERAH DRILL COMPLETED*\n\n{report}")
     except Exception as e:
         print(f"Failed to send Telegram report: {e}")
-    
+
     return {
         "drill_id": completed_drill.drill_id,
         "status": completed_drill.status.value,
@@ -1341,7 +1341,7 @@ async def redteam_kill_switch() -> dict:
         aborted = await abort_drill(latest.drill_id)
         if aborted:
             return {"status": "ABORTED", "drill_id": latest.drill_id, "message": "Drill aborted by kill switch"}
-    
+
     return {"status": "NO_RUNNING_DRILL", "message": "No running drill to abort"}
 
 
@@ -1413,7 +1413,7 @@ async def create_custom_request(body: CustomRequestCreate) -> dict:
     import uuid
     request_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    
+
     request = CustomRequest(
         request_id=request_id,
         client_name=body.client_name,
@@ -1423,7 +1423,7 @@ async def create_custom_request(body: CustomRequestCreate) -> dict:
         created_at=now,
     )
     await save_custom_request(request)
-    
+
     return {
         "request_id": request_id,
         "status": "PENDING_REVIEW",
@@ -1540,7 +1540,7 @@ async def create_learning_task_endpoint(body: LearningTaskCreate) -> dict:
     from datetime import datetime, timezone
     task_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    
+
     task = LearningTask(
         task_id=task_id,
         target_url=body.target_url,
@@ -1550,7 +1550,7 @@ async def create_learning_task_endpoint(body: LearningTaskCreate) -> dict:
         created_at=now,
     )
     await create_learning_task(task)
-    
+
     return {
         "task_id": task_id,
         "status": "PENDING",
@@ -1577,21 +1577,25 @@ class CurriculumRunRequest(BaseModel):
 
 
 @app.post("/api/curriculum/run")
-async def run_curriculum_endpoint(body: CurriculumRunRequest) -> dict:
+async def run_curriculum_endpoint(
+    body: CurriculumRunRequest,
+    _: None = Depends(verify_founder_authorization)
+) -> dict:
     """
     Trigger curriculum learning batch (Founder only).
-    Requires Founder approval via header X-Founder-Approval: true
+    Requires Founder approval via headers:
+    - X-Founder-Approval: true
+    - X-Founder-Signature: HMAC-SHA256 of "true" using FOUNDER_AUTH_SECRET
     """
-    # In production, verify Founder approval header
     max_fetch = min(max(1, body.max_fetch), 5)  # Clamp 1-5
     results = await run_curriculum_batch(max_fetch)
-    
+
     # Send summary to Founder
     from core.telegram_bot import send_message
     completed = [r for r in results if r.get("status") == "COMPLETED"]
     skipped = [r for r in results if r.get("status") == "SKIPPED_CACHED"]
     failed = [r for r in results if r.get("status") in ("FAILED", "ETHICS_BLOCKED")]
-    
+
     summary = (
         f"📚 *PAK GURU CURRICULUM RUN*\n"
         f"Fetch: {len(completed)} baru, {len(skipped)} cached, {len(failed)} gagal/blocked.\n"
@@ -1601,6 +1605,6 @@ async def run_curriculum_endpoint(body: CurriculumRunRequest) -> dict:
         await send_message(summary)
     except Exception as e:
         print(f"Failed to send curriculum summary: {e}")
-    
+
     return {"results": results, "summary": summary}
 

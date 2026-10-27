@@ -1,14 +1,16 @@
 """
-Pak Guru — Web Learner Agent (Wave 25)
+Pak Guru — Web Learner Agent (Wave 25/26)
 Perpetual Learning Engine untuk RakitDigital.
 Fetch sumber publik, ekstrak pola, simpan ke pattern database permanen.
-HANYA public info, rate-limited, cache permanen.
+HANYA public info, rate-limited, cache permanen, SECURE.
 """
 import re
 import asyncio
 import uuid
+import ipaddress
+import socket
 from datetime import datetime, timezone
-from typing import TypedDict
+from typing import TypedDict, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -34,8 +36,29 @@ class EthicsViolationError(Exception):
     pass
 
 
+class SecurityViolationError(Exception):
+    """Raised when fetch violates security rules (SSRF, redirect loop, size limit, etc.)."""
+    pass
+
+
 class WebLearner:
     """Pak Guru — Web Learner Agent."""
+
+    # Configuration constants
+    MAX_RESPONSE_SIZE = 2 * 1024 * 1024  # 2 MB
+    MAX_REDIRECTS = 5
+    ALLOWED_SCHEMES = {"https"}
+    BLOCKED_HOSTNAMES = {
+        "localhost",
+        "localhost.localdomain",
+        "127.0.0.1",
+        "::1",
+    }
+    METADATA_ENDPOINTS = {
+        "169.254.169.254",  # AWS/GCP/Azure metadata
+        "metadata.google.internal",
+        "metadata.azure.com",
+    }
 
     # Feature keyword mapping (deterministic extraction)
     FEATURE_KEYWORDS = {
@@ -74,42 +97,134 @@ class WebLearner:
     }
 
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
+        # Don't follow redirects automatically - we'll handle them manually
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, connect=5.0),
+            follow_redirects=False,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+        )
+        self._fetch_attempts = 0
+        self._fetch_successes = 0
+        self._patterns_created = 0
 
     async def close(self):
         await self.client.aclose()
 
     # ---------------------------------------------------------
-    # Ethics & Fetch
+    # URL Validation & Security
     # ---------------------------------------------------------
-    def _is_allowed_domain(self, url: str) -> bool:
-        """Check if domain is in whitelist or raw.githubusercontent.com."""
+    def _validate_url(self, url: str) -> urlparse:
+        """
+        Validate URL before fetching.
+        Returns parsed URL if valid, raises SecurityViolationError otherwise.
+        """
+        if not url or not isinstance(url, str):
+            raise SecurityViolationError("URL must be a non-empty string")
+
         parsed = urlparse(url)
-        domain = parsed.netloc.lower()
+
+        # 1. Only allow HTTPS scheme
+        if parsed.scheme not in self.ALLOWED_SCHEMES:
+            raise SecurityViolationError(f"Only HTTPS scheme allowed, got: {parsed.scheme}")
+
+        # 2. Reject URLs with username/password
+        if parsed.username or parsed.password:
+            raise SecurityViolationError("URLs with embedded credentials are not allowed")
+
+        # 3. Validate hostname
+        hostname = parsed.hostname
+        if not hostname:
+            raise SecurityViolationError("URL must have a valid hostname")
+
+        # 4. Reject blocked hostnames (localhost, etc.)
+        if hostname.lower() in self.BLOCKED_HOSTNAMES:
+            raise SecurityViolationError(f"Blocked hostname: {hostname}")
+
+        # 5. Resolve and check for private/internal IPs (SSRF protection)
+        try:
+            resolved_ips = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for info in resolved_ips:
+                ip = info[4][0]
+                ip_obj = ipaddress.ip_address(ip)
+                if (ip_obj.is_private or ip_obj.is_loopback or
+                    ip_obj.is_link_local or ip_obj.is_reserved or
+                    ip_obj.is_multicast):
+                    raise SecurityViolationError(f"Blocked IP address resolved: {ip}")
+                # Check metadata endpoints
+                if ip in self.METADATA_ENDPOINTS or hostname in self.METADATA_ENDPOINTS:
+                    raise SecurityViolationError(f"Blocked metadata endpoint: {hostname}")
+        except socket.gaierror:
+            raise SecurityViolationError(f"DNS resolution failed for: {hostname}")
+        except ValueError:
+            raise SecurityViolationError(f"Invalid IP address resolved: {hostname}")
+
+        # 6. Validate port (reject non-standard ports if specified)
+        if parsed.port is not None and parsed.port not in (80, 443, None):
+            # Only allow standard HTTP/HTTPS ports
+            raise SecurityViolationError(f"Non-standard port not allowed: {parsed.port}")
+
+        # 7. Whitelist check (exact domain or subdomain match for whitelisted domains)
+        if not self._is_allowed_domain(parsed):
+            raise SecurityViolationError(f"Domain not in whitelist: {hostname}")
+
+        return parsed
+
+    def _is_allowed_domain(self, parsed: urlparse) -> bool:
+        """Check if domain is in whitelist or raw.githubusercontent.com.
+        Uses exact domain or subdomain matching, not substring."""
+        domain = parsed.hostname.lower() if parsed.hostname else ""
+        if not domain:
+            return False
         if domain == "raw.githubusercontent.com":
             return True
         for allowed in DOC_WHITELIST:
-            if allowed in domain:
+            # Exact match or subdomain of allowed domain
+            if domain == allowed or domain.endswith("." + allowed):
                 return True
         return False
 
-    async def _check_robots_txt(self, url: str) -> bool:
-        """Check robots.txt for non-GitHub-raw domains (mockable)."""
-        parsed = urlparse(url)
-        domain = parsed.netloc
+    # ---------------------------------------------------------
+    # Robots.txt with Fail-Closed
+    # ---------------------------------------------------------
+    async def _check_robots_txt(self, parsed: urlparse) -> bool:
+        """Check robots.txt for non-GitHub-raw domains.
+        Fail-closed: if check fails for any reason, disallow access."""
+        domain = parsed.hostname
+        if not domain:
+            return False
         if domain == "raw.githubusercontent.com":
             return True  # GitHub raw allows
-        # For other domains, fetch robots.txt
+
+        # For whitelisted domains other than GitHub, fetch and parse robots.txt
         try:
             robots_url = f"{parsed.scheme}://{domain}/robots.txt"
-            resp = await self.client.get(robots_url, timeout=5.0)
-            if resp.status_code == 200:
-                content = resp.text.lower()
-                if "disallow: /" in content and "user-agent: *" in content:
-                    return False
+            resp = await self.client.get(robots_url, timeout=5.0, follow_redirects=False)
+
+            if resp.status_code == 404:
+                # No robots.txt = allow by default (standard behavior)
+                return True
+
+            if resp.status_code != 200:
+                # Any other status = fail closed
+                return False
+
+            content = resp.text.lower()
+            # Simple parsing: check for "User-agent: *" followed by "Disallow: /"
+            lines = content.split('\n')
+            user_agent_star = False
+            for line in lines:
+                line = line.strip()
+                if line.startswith("user-agent:"):
+                    ua = line.split(":", 1)[1].strip()
+                    user_agent_star = (ua == "*" or ua == "")
+                elif line.startswith("disallow:") and user_agent_star:
+                    disallow_path = line.split(":", 1)[1].strip()
+                    if disallow_path == "/" or disallow_path == "":
+                        return False  # Disallowed
+            return True
         except Exception:
-            pass  # If can't fetch robots.txt, assume allowed (conservative)
-        return True
+            # Fail closed on any error (timeout, DNS, connection error, etc.)
+            return False
 
     def _detect_login_wall(self, response: httpx.Response) -> bool:
         """Detect if response indicates login wall."""
@@ -120,34 +235,87 @@ class WebLearner:
             "login", "sign in", "signin", "password", "username",
             "auth", "oauth", "sso", "masuk", "daftar", "register"
         ]
-        # Check for login form
         if any(ind in content for ind in login_indicators):
             if "<form" in content or "<input" in content:
                 return True
         return False
 
+    # ---------------------------------------------------------
+    # Secure Fetch with Manual Redirect Handling
+    # ---------------------------------------------------------
     async def fetch_public(self, url: str) -> str:
         """
-        Fetch public content with ethics checks.
-        Raises EthicsViolationError if not allowed.
+        Fetch public content with comprehensive security checks.
+        Raises SecurityViolationError or EthicsViolationError if not allowed.
         """
-        # Domain whitelist check
-        if not self._is_allowed_domain(url):
-            raise EthicsViolationError(f"Domain not in whitelist: {url}")
+        # 1. Validate URL
+        parsed = self._validate_url(url)
 
-        # Check robots.txt
-        if not await self._check_robots_txt(url):
+        # 2. Check robots.txt (fail closed)
+        if not await self._check_robots_txt(parsed):
             raise EthicsViolationError(f"robots.txt disallows: {url}")
 
-        # Fetch with rate limiting handled by caller
-        response = await self.client.get(url, follow_redirects=True)
-        
-        # Detect login wall
-        if self._detect_login_wall(response):
-            raise EthicsViolationError(f"Login wall detected: {url}")
+        # 3. Fetch with manual redirect handling
+        self._fetch_attempts += 1
+        redirect_count = 0
+        current_url = url
 
-        response.raise_for_status()
-        return response.text
+        while redirect_count <= self.MAX_REDIRECTS:
+            # Re-validate each redirect target
+            current_parsed = self._validate_url(current_url)
+
+            response = await self.client.get(current_url, timeout=10.0, follow_redirects=False)
+
+            # Handle redirects manually
+            if response.status_code in (301, 302, 303, 307, 308):
+                redirect_count += 1
+                if redirect_count > self.MAX_REDIRECTS:
+                    raise SecurityViolationError(f"Redirect limit exceeded ({self.MAX_REDIRECTS})")
+
+                location = response.headers.get("location")
+                if not location:
+                    raise SecurityViolationError("Redirect without Location header")
+
+                # Resolve relative redirect URLs
+                next_url = str(httpx.URL(current_url).join(location))
+
+                # Validate redirect target
+                next_parsed = self._validate_url(next_url)
+                # Ensure redirect stays on HTTPS
+                if next_parsed.scheme != "https":
+                    raise SecurityViolationError(f"Redirect to non-HTTPS: {next_url}")
+
+                current_url = next_url
+                continue
+
+            # Not a redirect - process response
+            self._fetch_successes += 1
+
+            # Check for login wall
+            if self._detect_login_wall(response):
+                raise EthicsViolationError(f"Login wall detected: {current_url}")
+
+            # Check response size
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > self.MAX_RESPONSE_SIZE:
+                raise SecurityViolationError(f"Response too large: {content_length} bytes (max {self.MAX_RESPONSE_SIZE})")
+
+            # Read response with size limit
+            content = ""
+            async for chunk in response.aiter_text():
+                content += chunk
+                if len(content) > self.MAX_RESPONSE_SIZE:
+                    raise SecurityViolationError(f"Response exceeded size limit: {self.MAX_RESPONSE_SIZE} bytes")
+
+            # Check content type (only allow text/*)
+            content_type = response.headers.get("content-type", "").lower()
+            if content_type and not content_type.startswith("text/"):
+                raise SecurityViolationError(f"Unsupported content type: {content_type}")
+
+            response.raise_for_status()
+            return content
+
+        raise SecurityViolationError(f"Redirect limit exceeded ({self.MAX_REDIRECTS})")
 
     # ---------------------------------------------------------
     # Deterministic Feature Extraction
@@ -156,13 +324,13 @@ class WebLearner:
         """Deterministic keyword-based feature extraction."""
         text_lower = text.lower()
         features = {}
-        
+
         for feat_key, keywords in self.FEATURE_KEYWORDS.items():
             for kw in keywords:
                 if kw in text_lower:
                     features[feat_key] = True
                     break
-        
+
         # Payment methods detection
         payment_methods = []
         for pm_key, keywords in self.PAYMENT_KEYWORDS.items():
@@ -170,10 +338,10 @@ class WebLearner:
                 if kw in text_lower:
                     payment_methods.append(pm_key)
                     break
-        
+
         # User flow inference (deterministic per business_type)
         user_flow = self._infer_user_flow(business_type, features)
-        
+
         return {
             "features": features,
             "payment_methods": payment_methods,
@@ -205,9 +373,7 @@ class WebLearner:
     def compute_complexity(self, features: dict) -> tuple[int, int]:
         """Deterministic complexity score (1-10) and estimated build hours."""
         feat_count = len(features)
-        # Formula: 1 + feature_count, capped at 10
         complexity = min(1 + feat_count, 10)
-        # Estimated hours: complexity * 5 + 5
         estimated_hours = complexity * 5 + 5
         return complexity, estimated_hours
 
@@ -242,28 +408,28 @@ class WebLearner:
     # ---------------------------------------------------------
     async def learn_from_url(self, url: str, business_type: str, reference_company: str) -> ClientPattern:
         """Complete learning pipeline: fetch -> extract -> compute -> save."""
-        # Fetch
+        # Fetch with security
         raw_text = await self.fetch_public(url)
-        
+
         # Extract features deterministically
         extracted = self.extract_features(raw_text, business_type)
-        
+
         # Compute complexity & hours
         complexity, est_hours = self.compute_complexity(extracted["features"])
-        
+
         # LLM normalization for summary (graceful)
         summary = await self.normalize_with_llm(raw_text, {**extracted, "business_type": business_type})
-        
+
         # Create pattern
         now = datetime.now(timezone.utc).isoformat()
         pattern_id = str(uuid.uuid4())
-        
+
         # Determine pricing tiers observed (from text)
         pricing_tiers = self._extract_pricing_tiers(raw_text)
-        
+
         # Tech stack inference (basic)
         tech_stack = self._infer_tech_stack(raw_text)
-        
+
         pattern = ClientPattern(
             pattern_id=pattern_id,
             business_type=business_type,
@@ -279,11 +445,12 @@ class WebLearner:
             learned_at=now,
             is_active=True,
         )
-        
+
         # Save pattern
         from database import create_pattern
         await create_pattern(pattern)
-        
+        self._patterns_created += 1
+
         # Save to corporate memory (append-only)
         from database import save_corporate_memory
         from models import CorporateMemory, MemoryCategory, MemorySeverity
@@ -297,7 +464,7 @@ class WebLearner:
             created_at=now,
         )
         await save_corporate_memory(memory)
-        
+
         return pattern
 
     def _extract_pricing_tiers(self, text: str) -> list[str]:
@@ -348,38 +515,49 @@ class WebLearner:
         return mapping.get(business_type, "sari")
 
     # ---------------------------------------------------------
-    # Curriculum Batch Runner
+    # Curriculum Batch Runner with Fetch Budget
     # ---------------------------------------------------------
     async def run_curriculum_batch(self, max_fetch: int = 5) -> list[dict]:
-        """Run learning on up to max_fetch unlearned curriculum sources."""
+        """Run learning on up to max_fetch unlearned curriculum sources.
+        Enforces fetch budget: counts attempts, successes, and patterns separately.
+        """
+        # Normalize max_fetch
+        max_fetch = max(1, min(int(max_fetch), 5))
+
         # Seed initial patterns first
         from database import seed_initial_patterns
         await seed_initial_patterns()
-        
+
         results = []
-        fetched = 0
-        
+        fetched = 0  # successful fetches
+        fetch_attempts = 0  # total attempts
+
         for source in CURRICULUM_SOURCES:
             if fetched >= max_fetch:
                 break
-            
+
             url = source["url"]
-            
+
             # Permanent cache check
             if await is_url_learned(url):
                 results.append({
                     "url": url,
                     "reference": source["reference"],
                     "status": "SKIPPED_CACHED",
+                    "fetch_attempted": False,
                 })
                 continue
-            
-            # Rate limiting: 1 second between fetches
+
+            # Rate limiting: 1 second between successful fetches
             if fetched > 0:
                 await asyncio.sleep(1)
-            
+
+            fetch_attempts += 1
+
             try:
                 pattern = await self.learn_from_url(url, source["business_type"], source["reference"])
+                fetched += 1
+                self._patterns_created += 1
                 results.append({
                     "url": url,
                     "reference": source["reference"],
@@ -388,14 +566,23 @@ class WebLearner:
                     "complexity": pattern.complexity_score,
                     "est_hours": pattern.estimated_build_hours,
                     "status": "COMPLETED",
+                    "fetch_attempted": True,
                 })
-                fetched += 1
             except EthicsViolationError as e:
                 results.append({
                     "url": url,
                     "reference": source["reference"],
                     "status": "ETHICS_BLOCKED",
                     "error": str(e),
+                    "fetch_attempted": True,
+                })
+            except SecurityViolationError as e:
+                results.append({
+                    "url": url,
+                    "reference": source["reference"],
+                    "status": "SECURITY_BLOCKED",
+                    "error": str(e),
+                    "fetch_attempted": True,
                 })
             except Exception as e:
                 results.append({
@@ -403,9 +590,18 @@ class WebLearner:
                     "reference": source["reference"],
                     "status": "FAILED",
                     "error": str(e),
+                    "fetch_attempted": True,
                 })
-        
-        return results
+
+        return {
+            "results": results,
+            "summary": {
+                "fetch_attempts": fetch_attempts,
+                "successful_fetches": fetched,
+                "patterns_created": self._patterns_created,
+                "skipped_cached": sum(1 for r in results if r.get("status") == "SKIPPED_CACHED"),
+            }
+        }
 
 
 # Singleton instance
@@ -422,7 +618,9 @@ async def get_web_learner() -> WebLearner:
 async def run_curriculum_batch(max_fetch: int = 5) -> list[dict]:
     """Convenience function for scheduler."""
     learner = await get_web_learner()
-    return await learner.run_curriculum_batch(max_fetch)
+    result = await learner.run_curriculum_batch(max_fetch)
+    # Return just the results list for backward compatibility
+    return result["results"]
 
 
 async def execute_learning_task(task_id: str) -> dict:
@@ -430,11 +628,11 @@ async def execute_learning_task(task_id: str) -> dict:
     task = await get_learning_task(task_id)
     if not task:
         return {"status": "NOT_FOUND", "task_id": task_id}
-    
+
     # Mark in progress
     task.status = LearningTaskStatus.IN_PROGRESS
     await update_learning_task(task)
-    
+
     learner = await get_web_learner()
     try:
         pattern = await learner.learn_from_url(task.target_url, task.business_type, task.reference_company)
@@ -451,6 +649,12 @@ async def execute_learning_task(task_id: str) -> dict:
     except EthicsViolationError as e:
         task.status = LearningTaskStatus.FAILED
         task.error_message = f"Ethics violation: {str(e)}"
+        task.completed_at = datetime.now(timezone.utc).isoformat()
+        await update_learning_task(task)
+        return {"status": "FAILED", "error": str(e)}
+    except SecurityViolationError as e:
+        task.status = LearningTaskStatus.FAILED
+        task.error_message = f"Security violation: {str(e)}"
         task.completed_at = datetime.now(timezone.utc).isoformat()
         await update_learning_task(task)
         return {"status": "FAILED", "error": str(e)}

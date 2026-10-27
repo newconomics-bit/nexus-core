@@ -15,6 +15,7 @@ from agents.contract_generator import expire_contract
 from agents.customer_success import check_onboarding_progress, check_client_health_all
 from agents.disaster_recovery import run_backup, watchdog_check, run_dr_drill
 from agents.red_team import RedTeamAttacker
+from agents.web_learner import run_curriculum_batch
 from core.telegram_bot import send_message
 from models import DrillTrigger, RedTeamDrill
 
@@ -181,6 +182,28 @@ async def run_scheduler_tick() -> dict:
         except Exception as e:
             print(f"Red team drill failed: {e}")
 
+    # Weekly Curriculum Learning - Monday 04:00 (after Red Team)
+    curriculum_result = None
+    if now.weekday() == 0 and now.hour == 4:  # Monday 04:00
+        try:
+            curriculum_result = await run_curriculum_batch(max_fetch=1)
+            # Send summary to Founder
+            completed = [r for r in curriculum_result if r.get("status") == "COMPLETED"]
+            skipped = [r for r in curriculum_result if r.get("status") == "SKIPPED_CACHED"]
+            failed = [r for r in curriculum_result if r.get("status") in ("FAILED", "ETHICS_BLOCKED")]
+            summary = (
+                f"📚 *PAK GURU CURRICULUM RUN*\n"
+                f"Fetch: {len([r for r in curriculum_result if r.get('status') == 'COMPLETED'])} baru, "
+                f"{len([r for r in curriculum_result if r.get('status') == 'SKIPPED_CACHED'])} cached, "
+                f"{len([r for r in curriculum_result if r.get('status') in ('FAILED', 'ETHICS_BLOCKED')])} gagal/blocked."
+            )
+            try:
+                await send_message(f"📚 *PAK GURU CURRICULUM RUN*\n{summary}")
+            except Exception as e:
+                print(f"Failed to send curriculum summary: {e}")
+        except Exception as e:
+            print(f"Curriculum learning failed: {e}")
+
     return {
         "discount_timeouts": discount_results,
         "expired_qris": expired_qris,
@@ -195,6 +218,7 @@ async def run_scheduler_tick() -> dict:
         "drill": drill_result.model_dump() if drill_result else None,
         "monthly_review": monthly_result,
         "redteam_drill": redteam_result.model_dump() if redteam_result else None,
+        "curriculum_learning": curriculum_result,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

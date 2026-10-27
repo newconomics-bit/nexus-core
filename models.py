@@ -311,6 +311,7 @@ class MemoryCategory(str, Enum):
     CLIENT_CHURN_REASON = "CLIENT_CHURN_REASON"
     OPS_INCIDENT = "OPS_INCIDENT"
     RED_TEAM_FINDING = "RED_TEAM_FINDING"
+    BUSINESS_PATTERN = "BUSINESS_PATTERN"
 
 
 class MemorySeverity(str, Enum):
@@ -806,7 +807,41 @@ class CustomRequest(BaseModel):
     updated_at: str | None = None
 
 
-# Add new values to existing enums
-# MemoryCategory already has RED_TEAM_FINDING from Wave 20/21
-# AlertType - add CUSTOM_REQUEST
+# ==================== WAVE 25: PAK GURU — GOLDEN CURRICULUM ====================
+
+class LearningTaskStatus(str, Enum):
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ClientPattern(BaseModel):
+    pattern_id: str
+    business_type: str
+    reference_company: str
+    features: dict
+    payment_methods: list[str]
+    user_flow: list[str]
+    tech_stack_inferred: dict
+    pricing_tiers_observed: list[str]
+    complexity_score: int  # 1-10
+    estimated_build_hours: int
+    source_urls: list[str]
+    learned_at: str
+    updated_at: str | None = None
+    is_active: bool = True
+    superseded_by: str | None = None
+
+
+class LearningTask(BaseModel):
+    task_id: str
+    target_url: str
+    business_type: str
+    reference_company: str
+    status: LearningTaskStatus = LearningTaskStatus.PENDING
+    extracted_summary: dict | None = None
+    error_message: str | None = None
+    created_at: str
+    completed_at: str | None = None
 

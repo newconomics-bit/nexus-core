@@ -4,10 +4,137 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus, AuditLog, AuditAction, AuditResult, AttackScenario, AttackStatus, AttackSeverity, AttackResult, DrillTrigger, RedTeamDrill, RedTeamDrillStatus, CustomRequest, CustomRequestStatus
+from models import ApprovalRequest, Quote, BuildArtifact, BuildSubmission, BuildTask, AuditFinding, AuditReport, DeploymentRequest, Invoice, Subscription, QrisRequest, MockLedgerEntry, CorporateMemory, AlertEvent, DailyReport, TechnicalDecision, FeatureRequest, AgentPerformance, Contract, ContractType, ContractStatus, DecisionType, OnboardingPlan, OnboardingItem, OnboardingItemStatus, SupportTicket, TicketCategory, TicketStatus, ClientHealth, BackupRecord, BackupType, BackupStatus, Incident, IncidentType, IncidentSeverity, IncidentStatus, DrillResult, DrillStatus, Campaign, CampaignKPI, CampaignObjective, CampaignStatus, ICPDefinition, CompetitiveBattlecard, ABTest, ABTestStatus, LeadGenResult, PartnershipEvaluation, PartnerType, PartnershipStatus, AuditLog, AuditAction, AuditResult, AttackScenario, AttackStatus, AttackSeverity, AttackResult, DrillTrigger, RedTeamDrill, RedTeamDrillStatus, CustomRequest, CustomRequestStatus, ClientPattern, LearningTask, LearningTaskStatus
 
 DB_PATH = "rakitdigital.db"
 TEST_ATTACK_DB_PATH = "test_attack.db"
+
+
+async def get_red_team_db() -> aiosqlite.Connection:
+    """Get a connection to the isolated red team test database."""
+    db = await aiosqlite.connect(TEST_ATTACK_DB_PATH)
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA foreign_keys = ON")
+    # Initialize test database schema if needed
+    await init_test_db(db)
+    return db
+
+
+async def init_test_db(db: aiosqlite.Connection) -> None:
+    """Initialize the test database with required tables for red team tests."""
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            client_name TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    cursor = await db.execute("PRAGMA table_info(projects)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "spec_json" not in columns:
+        await db.execute("ALTER TABLE projects ADD COLUMN spec_json TEXT")
+    if "created_at" not in columns:
+        await db.execute("ALTER TABLE projects ADD COLUMN created_at TEXT")
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quotes (
+            quote_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            hpp_breakdown TEXT NOT NULL,
+            margin_pct REAL NOT NULL,
+            discount_pct REAL NOT NULL,
+            final_price INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            valid_until_days INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approvals (
+            approval_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            quote_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            status TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            decided_at TEXT NOT NULL DEFAULT '',
+            decided_by TEXT NOT NULL DEFAULT '',
+            expires_at TEXT
+        )
+        """
+    )
+    cursor = await db.execute("PRAGMA table_info(approvals)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "expires_at" not in columns:
+        await db.execute("ALTER TABLE approvals ADD COLUMN expires_at TEXT")
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS invoices (
+            invoice_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            due_date TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS corporate_memory (
+            memory_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            lesson_text TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mock_ledger (
+            entry_id TEXT PRIMARY KEY,
+            reference_code TEXT NOT NULL UNIQUE,
+            qris_id TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            paid_at TEXT NOT NULL
+        )
+        """
+    )
+    await db.commit()
+
+    # Apply schema migrations for test database (run at module load)
+    # corporate_memory - ensure lesson_text and target_agent columns exist
+    cursor = await db.execute("PRAGMA table_info(corporate_memory)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "lesson_text" not in columns:
+        await db.execute("ALTER TABLE corporate_memory ADD COLUMN lesson_text TEXT NOT NULL DEFAULT ''")
+    if "target_agent" not in columns:
+        await db.execute("ALTER TABLE corporate_memory ADD COLUMN target_agent TEXT NOT NULL DEFAULT ''")
+    if "category" not in columns:
+        await db.execute("ALTER TABLE corporate_memory ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+    if "severity" not in columns:
+        await db.execute("ALTER TABLE corporate_memory ADD COLUMN severity TEXT NOT NULL DEFAULT ''")
+    
+    # mock_ledger - ensure reference_code and paid_at columns exist
+    cursor = await db.execute("PRAGMA table_info(mock_ledger)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "reference_code" not in columns:
+        # Add without UNIQUE first, then create unique index
+        await db.execute("ALTER TABLE mock_ledger ADD COLUMN reference_code TEXT NOT NULL DEFAULT ''")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mock_ledger_reference_code ON mock_ledger(reference_code)")
+    if "paid_at" not in columns:
+        await db.execute("ALTER TABLE mock_ledger ADD COLUMN paid_at TEXT NOT NULL DEFAULT ''")
+    await db.commit()
 
 
 async def init_db() -> None:
@@ -557,6 +684,42 @@ async def init_db() -> None:
                 remediation_agent TEXT NOT NULL,
                 remediation_task TEXT NOT NULL,
                 executed_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS client_patterns (
+                pattern_id TEXT PRIMARY KEY,
+                business_type TEXT NOT NULL,
+                reference_company TEXT NOT NULL,
+                features TEXT NOT NULL,
+                payment_methods TEXT NOT NULL,
+                user_flow TEXT NOT NULL,
+                tech_stack_inferred TEXT NOT NULL,
+                pricing_tiers_observed TEXT NOT NULL,
+                complexity_score INTEGER NOT NULL,
+                estimated_build_hours INTEGER NOT NULL,
+                source_urls TEXT NOT NULL,
+                learned_at TEXT NOT NULL,
+                updated_at TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                superseded_by TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_tasks (
+                task_id TEXT PRIMARY KEY,
+                target_url TEXT NOT NULL,
+                business_type TEXT NOT NULL,
+                reference_company TEXT NOT NULL,
+                status TEXT NOT NULL,
+                extracted_summary TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
             )
             """
         )
@@ -3382,8 +3545,426 @@ async def update_custom_request_status(
         return cursor.rowcount > 0
 
 
-# Isolated DB connection for red team attacks
-async def get_red_team_db() -> aiosqlite.Connection:
+async def update_custom_request_status(
+    request_id: str, status: CustomRequestStatus, estimated_budget: int | None = None
+) -> bool:
+    """Update custom request status and optionally estimated budget."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if estimated_budget is not None:
+            cursor = await db.execute(
+                "UPDATE custom_requests SET status = ?, estimated_budget = ?, updated_at = ? WHERE request_id = ?",
+                (
+                    status.value,
+                    estimated_budget,
+                    datetime.now(timezone.utc).isoformat(),
+                    request_id,
+                ),
+            )
+        else:
+            cursor = await db.execute(
+                "UPDATE custom_requests SET status = ?, updated_at = ? WHERE request_id = ?",
+                (
+                    status.value,
+                    datetime.now(timezone.utc).isoformat(),
+                    request_id,
+                ),
+            )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+# ==================== CLIENT PATTERNS (WAVE 25) ====================
+
+def _row_to_client_pattern(row: aiosqlite.Row) -> ClientPattern:
+    import json
+    return ClientPattern(
+        pattern_id=row["pattern_id"],
+        business_type=row["business_type"],
+        reference_company=row["reference_company"],
+        features=json.loads(row["features"]),
+        payment_methods=json.loads(row["payment_methods"]),
+        user_flow=json.loads(row["user_flow"]),
+        tech_stack_inferred=json.loads(row["tech_stack_inferred"]),
+        pricing_tiers_observed=json.loads(row["pricing_tiers_observed"]),
+        complexity_score=row["complexity_score"],
+        estimated_build_hours=row["estimated_build_hours"],
+        source_urls=json.loads(row["source_urls"]),
+        learned_at=row["learned_at"],
+        updated_at=row["updated_at"],
+        is_active=bool(row["is_active"]),
+        superseded_by=row["superseded_by"],
+    )
+
+
+async def create_pattern(pattern: ClientPattern) -> None:
+    """Create a new client pattern."""
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO client_patterns (
+                pattern_id, business_type, reference_company, features,
+                payment_methods, user_flow, tech_stack_inferred,
+                pricing_tiers_observed, complexity_score, estimated_build_hours,
+                source_urls, learned_at, updated_at, is_active, superseded_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pattern.pattern_id,
+                pattern.business_type,
+                pattern.reference_company,
+                json.dumps(pattern.features),
+                json.dumps(pattern.payment_methods),
+                json.dumps(pattern.user_flow),
+                json.dumps(pattern.tech_stack_inferred),
+                json.dumps(pattern.pricing_tiers_observed),
+                pattern.complexity_score,
+                pattern.estimated_build_hours,
+                json.dumps(pattern.source_urls),
+                pattern.learned_at,
+                pattern.updated_at,
+                1 if pattern.is_active else 0,
+                pattern.superseded_by,
+            ),
+        )
+        await db.commit()
+
+
+async def get_active_patterns(business_type: str | None = None) -> list[ClientPattern]:
+    """Get all active patterns, optionally filtered by business_type."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if business_type:
+            cursor = await db.execute(
+                "SELECT * FROM client_patterns WHERE is_active = 1 AND business_type = ? ORDER BY learned_at DESC",
+                (business_type,),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM client_patterns WHERE is_active = 1 ORDER BY learned_at DESC"
+            )
+        rows = await cursor.fetchall()
+        return [_row_to_client_pattern(row) for row in rows]
+
+
+async def get_pattern_by_id(pattern_id: str) -> ClientPattern | None:
+    """Get a specific pattern by ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM client_patterns WHERE pattern_id = ?",
+            (pattern_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_client_pattern(row)
+
+
+async def supersede_pattern(old_pattern_id: str, new_pattern_id: str) -> bool:
+    """Mark old pattern as inactive and link to new pattern (append-only)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE client_patterns SET is_active = 0, superseded_by = ?, updated_at = ? WHERE pattern_id = ?",
+            (
+                new_pattern_id,
+                datetime.now(timezone.utc).isoformat(),
+                old_pattern_id,
+            ),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def search_patterns(
+    query: str, business_type: str | None = None, top_k: int = 5
+) -> list[ClientPattern]:
+    """Search patterns using keyword weighted scoring."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if business_type:
+            cursor = await db.execute(
+                "SELECT * FROM client_patterns WHERE is_active = 1 AND business_type = ?",
+                (business_type,),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM client_patterns WHERE is_active = 1"
+            )
+        rows = await cursor.fetchall()
+    
+    import json
+    patterns = [_row_to_client_pattern(row) for row in rows]
+    
+    # Simple keyword scoring
+    query_tokens = set(query.lower().split())
+    scored = []
+    for p in patterns:
+        score = 0
+        # Match in reference_company
+        for token in query_tokens:
+            if token in p.reference_company.lower():
+                score += 3
+        # Match in features keys
+        for token in query_tokens:
+            for feat_key in p.features.keys():
+                if token in feat_key.lower():
+                    score += 2
+        # Match in user_flow
+        for token in query_tokens:
+            for flow in p.user_flow:
+                if token in flow.lower():
+                    score += 2
+        # Match in business_type
+        for token in query_tokens:
+            if token in p.business_type.lower():
+                score += 1
+        if score > 0:
+            scored.append((score, p))
+    
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored[:top_k]]
+
+
+async def is_url_learned(url: str) -> bool:
+    """Check if a URL has already been learned (permanent cache)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM client_patterns WHERE ? LIKE '%' || source_urls || '%' OR source_urls LIKE '%' || ? || '%' LIMIT 1",
+            (url, url),
+        )
+        row = await cursor.fetchone()
+        return row is not None
+
+
+async def seed_initial_patterns(force: bool = False) -> None:
+    """Seed initial patterns from Founder agreement (deterministic)."""
+    from datetime import datetime, timezone
+    import json
+    import uuid
+    
+    # Check if already seeded (unless forced)
+    if not force:
+        existing = await get_active_patterns()
+        if existing:
+            return
+    
+# Clear existing patterns if forced
+    if force:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM client_patterns")
+            await db.commit()
+
+    # Add ALTER TABLE checks for corporate_memory and mock_ledger (for schema migrations)
+    async with aiosqlite.connect(DB_PATH) as db:
+        # corporate_memory - check for lesson_text column
+        cursor = await db.execute("PRAGMA table_info(corporate_memory)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "lesson_text" not in columns:
+            await db.execute("ALTER TABLE corporate_memory ADD COLUMN lesson_text TEXT NOT NULL DEFAULT ''")
+        if "target_agent" not in columns:
+            await db.execute("ALTER TABLE corporate_memory ADD COLUMN target_agent TEXT NOT NULL DEFAULT ''")
+        if "category" not in columns:
+            await db.execute("ALTER TABLE corporate_memory ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+        if "severity" not in columns:
+            await db.execute("ALTER TABLE corporate_memory ADD COLUMN severity TEXT NOT NULL DEFAULT ''")
+        # If old 'content' column exists, we can't easily migrate, but new inserts will use lesson_text
+        
+        # mock_ledger - check for reference_code column
+        cursor = await db.execute("PRAGMA table_info(mock_ledger)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "reference_code" not in columns:
+            await db.execute("ALTER TABLE mock_ledger ADD COLUMN reference_code TEXT NOT NULL UNIQUE DEFAULT ''")
+        if "paid_at" not in columns:
+            await db.execute("ALTER TABLE mock_ledger ADD COLUMN paid_at TEXT NOT NULL DEFAULT ''")
+        # Remove old columns if they exist (SQLite doesn't support DROP COLUMN easily, so we just ignore)
+        await db.commit()
+    
+    now = datetime.now(timezone.utc).isoformat()
+    initial_patterns = [
+        ClientPattern(
+            pattern_id=str(uuid.uuid4()),
+            business_type="fnb",
+            reference_company="Mie Gacoan Style",
+            features={
+                "qr_ordering": True,
+                "table_management": True,
+                "kitchen_display": True,
+                "inventory_sync": True,
+                "qris_payment": True,
+            },
+            payment_methods=["qris"],
+            user_flow=["scan_qr", "view_menu", "add_to_cart", "checkout_qris", "order_tracking"],
+            tech_stack_inferred={},
+            pricing_tiers_observed=[],
+            complexity_score=7,
+            estimated_build_hours=40,
+            source_urls=["founder_seed"],
+            learned_at=now,
+            is_active=True,
+        ),
+        ClientPattern(
+            pattern_id=str(uuid.uuid4()),
+            business_type="gym",
+            reference_company="Membership Lifecycle",
+            features={
+                "membership_tier": True,
+                "class_booking": True,
+                "attendance": True,
+                "recurring_billing": True,
+                "retention_offer": True,
+            },
+            payment_methods=["qris", "va"],
+            user_flow=["view_classes", "book_class", "check_in", "recurring_payment", "retention_offer"],
+            tech_stack_inferred={},
+            pricing_tiers_observed=[],
+            complexity_score=6,
+            estimated_build_hours=35,
+            source_urls=["founder_seed"],
+            learned_at=now,
+            is_active=True,
+        ),
+        ClientPattern(
+            pattern_id=str(uuid.uuid4()),
+            business_type="salon",
+            reference_company="Full Service",
+            features={
+                "membership_discount": True,
+                "staff_commission": True,
+                "booking_per_chair": True,
+                "audit_log": True,
+            },
+            payment_methods=["qris", "cash"],
+            user_flow=["book_appointment", "service", "checkout", "commission_calc"],
+            tech_stack_inferred={},
+            pricing_tiers_observed=[],
+            complexity_score=6,
+            estimated_build_hours=32,
+            source_urls=["founder_seed"],
+            learned_at=now,
+            is_active=True,
+        ),
+        ClientPattern(
+            pattern_id=str(uuid.uuid4()),
+            business_type="retail",
+            reference_company="POS UMKM",
+            features={
+                "pos_interface": True,
+                "barcode_scan": True,
+                "stock_auto_deduct": True,
+                "receipt_print": True,
+                "audit_log": True,
+            },
+            payment_methods=["qris", "cash", "va"],
+            user_flow=["scan_barcode", "add_to_cart", "checkout", "print_receipt"],
+            tech_stack_inferred={},
+            pricing_tiers_observed=[],
+            complexity_score=5,
+            estimated_build_hours=28,
+            source_urls=["founder_seed"],
+            learned_at=now,
+            is_active=True,
+        ),
+    ]
+    
+    for pattern in initial_patterns:
+        await create_pattern(pattern)
+
+
+# ==================== LEARNING TASKS (WAVE 25) ====================
+
+def _row_to_learning_task(row: aiosqlite.Row) -> LearningTask:
+    import json
+    summary = None
+    if row["extracted_summary"]:
+        summary = json.loads(row["extracted_summary"])
+    return LearningTask(
+        task_id=row["task_id"],
+        target_url=row["target_url"],
+        business_type=row["business_type"],
+        reference_company=row["reference_company"],
+        status=LearningTaskStatus(row["status"]),
+        extracted_summary=summary,
+        error_message=row["error_message"],
+        created_at=row["created_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+async def create_learning_task(task: LearningTask) -> None:
+    """Create a new learning task."""
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO learning_tasks (
+                task_id, target_url, business_type, reference_company,
+                status, extracted_summary, error_message, created_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task.task_id,
+                task.target_url,
+                task.business_type,
+                task.reference_company,
+                task.status.value,
+                json.dumps(task.extracted_summary) if task.extracted_summary else None,
+                task.error_message,
+                task.created_at,
+                task.completed_at,
+            ),
+        )
+        await db.commit()
+
+
+async def get_pending_tasks() -> list[LearningTask]:
+    """Get all pending learning tasks."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM learning_tasks WHERE status = ? ORDER BY created_at ASC",
+            (LearningTaskStatus.PENDING.value,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_learning_task(row) for row in rows]
+
+
+async def get_learning_task(task_id: str) -> LearningTask | None:
+    """Get a learning task by ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM learning_tasks WHERE task_id = ?",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_learning_task(row)
+
+
+async def update_learning_task(task: LearningTask) -> None:
+    """Update learning task status and results."""
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE learning_tasks SET
+                status = ?,
+                extracted_summary = ?,
+                error_message = ?,
+                completed_at = ?
+            WHERE task_id = ?
+            """,
+            (
+                task.status.value,
+                json.dumps(task.extracted_summary) if task.extracted_summary else None,
+                task.error_message,
+                task.completed_at,
+                task.task_id,
+            ),
+        )
+        await db.commit()
     """Get a connection to the isolated test_attack.db for red team operations."""
     conn = await aiosqlite.connect(TEST_ATTACK_DB_PATH)
     conn.row_factory = aiosqlite.Row
@@ -3522,4 +4103,24 @@ async def get_red_team_db() -> aiosqlite.Connection:
         """
     )
     await conn.commit()
+    
+    # Apply schema migrations for existing test databases
+    # mock_ledger - ensure reference_code column exists
+    cursor = await conn.execute("PRAGMA table_info(mock_ledger)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "reference_code" not in columns:
+        await conn.execute("ALTER TABLE mock_ledger ADD COLUMN reference_code TEXT NOT NULL DEFAULT ''")
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mock_ledger_reference_code ON mock_ledger(reference_code)")
+    if "paid_at" not in columns:
+        await conn.execute("ALTER TABLE mock_ledger ADD COLUMN paid_at TEXT NOT NULL DEFAULT ''")
+    
+    # corporate_memory - ensure lesson_text column exists
+    cursor = await conn.execute("PRAGMA table_info(corporate_memory)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "lesson_text" not in columns:
+        await conn.execute("ALTER TABLE corporate_memory ADD COLUMN lesson_text TEXT NOT NULL DEFAULT ''")
+    if "target_agent" not in columns:
+        await conn.execute("ALTER TABLE corporate_memory ADD COLUMN target_agent TEXT NOT NULL DEFAULT ''")
+    await conn.commit()
+    
     return conn
